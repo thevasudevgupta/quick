@@ -7,7 +7,6 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 import os
-from typing import Dict
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -65,8 +64,9 @@ USAGE:
 @dataclass
 class TrainingArgs:
 
+    lr: float = 5e-5
     train_batch_size: int = 8
-    accumulation_steps: int = 1
+    accumulation_steps: int = 1 # TODO: fix this
     max_epochs: int = 5
 
     base_dir: str = None
