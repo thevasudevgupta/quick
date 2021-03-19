@@ -400,33 +400,25 @@ class TrainingLoop(ABC, TrainerSetup):
                 self.model.train(True)
                 # simply doing forward-propogation
                 loss = self.training_step(batch, batch_idx)
-                loss /= self.accumulation_steps
 
                 # accumulating tr_loss for logging (helpful when accumulation-steps > 1)
-                tr_loss += loss.item()
+                tr_loss = loss.item()
                 self.backward(loss)
-
                 self.after_backward(batch_idx)
 
-                # gradient accumulation handler
-                if (batch_idx+1)%self.accumulation_steps == 0:
+                self.optimizer_step(batch_idx, epoch) # update parameters, learning_rate
 
-                    self.optimizer_step(batch_idx, epoch) # update parameters, learning_rate
+                wandb.log({
+                    'global_steps': steps,
+                    'step_tr_loss': tr_loss,
+                    'learning_rate': self.optimizer.param_groups[0]["lr"],
+                }, commit=True)
 
-                    wandb.log({
-                        'global_steps': steps,
-                        'step_tr_loss': tr_loss,
-                        'learning_rate': self.lr_scheduler.get_lr(),
-                    }, commit=True)
+                steps += 1
+                pbar.set_postfix(tr_loss=tr_loss)
 
-                    steps += 1
-                    pbar.set_postfix(tr_loss=tr_loss)
-
-                    # accumulating losses for training-loss at epoch end
-                    losses.append(tr_loss)
-
-                    # emptying tr_loss
-                    tr_loss = 0
+                # accumulating losses for training-loss at epoch end
+                losses.append(tr_loss)
 
                 self.training_batch_end(batch_idx)
 
