@@ -62,7 +62,7 @@ USAGE:
 """
 
 @dataclass
-class TrainingArgs:
+class DSTrainingArgs:
 
     lr: float = 5e-5
     batch_size: int = 8
@@ -155,8 +155,8 @@ class TrainerSetup(object):
             raise KeyboardInterrupt("Model training stopped due to early-stopping")
 
     @staticmethod
-    def _sanity_check(args: TrainingArgs):
-        if not isinstance(args, TrainingArgs):
+    def _sanity_check(args: DSTrainingArgs):
+        if not isinstance(args, DSTrainingArgs):
             raise ValueError("Your argument class must be inherited from TrainingArgs")
 
     @staticmethod
@@ -215,7 +215,7 @@ class TrainerSetup(object):
             print("{} | {}".format(l, p))
 
 
-class Trainer(ABC, TrainerSetup):
+class DSTrainer(ABC, TrainerSetup):
 
     @abstractmethod
     def setup_optimizer(self, **kwargs):
@@ -250,7 +250,7 @@ class Trainer(ABC, TrainerSetup):
             self.save_model_state_dict(os.path.join(self.base_dir, self.save_epoch_dir+f"-e{epoch}"))
             self.save_training_state_dict(self.base_dir)
 
-    def __init__(self, args: TrainingArgs):
+    def __init__(self, args: DSTrainingArgs):
         super().__init__()
 
         self._sanity_check(args)
