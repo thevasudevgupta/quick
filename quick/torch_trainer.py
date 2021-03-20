@@ -17,7 +17,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 if not torch.cuda.is_available():
-    logger.warning("CUDA is not available => Training will happen on CPU")
+    logger.warning("[Quick WARNING] CUDA is not available => Training will happen on CPU")
 
 """
 USAGE:
@@ -79,9 +79,14 @@ class TorchTrainingArgs:
         self.map_location = torch.device(self.map_location)
 
         if self.precision == "mixed16":
-            logger.wanrning("mixed precision training is not supported curreltly, Setting `precision='mixed16'`")
+            logger.wanrning("[Quick WARNING] mixed precision training is not supported curreltly, Setting `precision='mixed16'`")
 
-        print("model weights will be saved in {path} file".format(path=os.path.join(self.base_dir, "pytorch_model.bin")))
+        print(f"[Quick EXPERIMENT DIRECTORY] {self.base_dir}")
+
+        if self.save_epoch_dir is not None:
+            print("[Quick MODEL EPOCHS DIRECTORY] {}".format(os.path.join(self.base_dir, self.save_epoch_dir)))
+        else:
+            logger.warning("[Quick WARNING] You are not saving weights after every epoch.")
         # training stuff will be in `training.tar`
 
 
@@ -270,14 +275,15 @@ class TorchTrainer(ABC, TrainerSetup):
         self.base_dir = self._setup_basedir(self.base_dir)
         self.save_epoch_dir = self._setup_savedir(self.save_epoch_dir, self.base_dir)
 
+        self.device = self.setup_hardware()
+        print(f"[Quick DEVICE] {self.device}")
+
         self.model = model
+        self.model.to(self.device)
+
         self.optimizer = self.setup_optimizer()
         self.scheduler = self.setup_scheduler()
         self.scaler = self.setup_scaler()
-
-        self.device = self.setup_hardware()
-
-        print(f"[DEVICE:] {self.device}")
 
         wandb_args = {
             "wandb_config": self.args,
@@ -365,7 +371,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
                 self.model.train(True)
                 # simply doing forward-propogation
-                loss = self.train_step(batch, batch_idx)
+                loss = self.training_step(batch, batch_idx)
                 loss /= self.gradient_accumulation_steps
 
                 # accumulating tr_loss for logging (helpful when accumulation-steps > 1)

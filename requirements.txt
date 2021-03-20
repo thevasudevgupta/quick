@@ -3,5 +3,5 @@ torch
 tensorboard
 wandb
 tqdm
-deepspeed
-mpi4py
+# deepspeed
+# mpi4py

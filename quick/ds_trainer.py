@@ -309,7 +309,7 @@ class DSTrainer(ABC, TrainerSetup):
 
     @staticmethod
     def init_deepspeed(
-        args: TrainingArgs,
+        args: DSTrainingArgs,
         model: nn.Module,
         optimizer: torch.optim,
         lr_scheduler: torch.optim.lr_scheduler
