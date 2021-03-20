@@ -1,4 +1,5 @@
 
+import os
 import torch
 from transformers import MBartForConditionalGeneration, MBartTokenizer
 from datasets import load_dataset
@@ -93,7 +94,7 @@ class Trainer(quick.TorchTrainer):
         loss = out["loss"].mean()
         return loss
 
-    def training_epoch_end(self, epoch, losses):
+    def training_epoch_end(self, epoch, **kwargs):
         # saving state_dict at epoch level
         if self.args.weights_dir:
             self.model.save_pretrained(os.path.join(self.args.base_dir, self.args.weights_dir+f"-e{epoch}"))
