@@ -4,3 +4,4 @@ tensorboard
 wandb
 tqdm
 deepspeed
+mpi4py

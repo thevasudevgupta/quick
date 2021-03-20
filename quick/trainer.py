@@ -90,6 +90,10 @@ class TrainingArgs:
         logger.info("model weights will be saved in {path} file".format(path=os.path.join(self.base_dir, "pytorch_model.bin")))
         # training stuff will be in `training.tar`
 
+        if torch.cuda.is_available() and not self.enable_deepspeed:
+            logger.warning("GPU is available then why using CPU [forgot to change `enable_deepspeed=False` ??]\nNo Worries! Setting `enable_deepspeed=True`")
+            self.enable_deepspeed = True
+
 class TrainerSetup(object):
 
     def __init__(self):
@@ -211,13 +215,12 @@ class TrainerSetup(object):
             print("{} | {}".format(l, p))
 
 
-class TrainingLoop(ABC, TrainerSetup):
+class Trainer(ABC, TrainerSetup):
 
     @abstractmethod
     def setup_optimizer(self, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
-    @abstractmethod
     def setup_scheduler(self, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
@@ -229,15 +232,12 @@ class TrainingLoop(ABC, TrainerSetup):
     def evaluate_on_batch(self, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
-    @abstractmethod
     def after_backward(self, batch_idx):
         """This method is called just after `loss.backward()`"""
 
-    @abstractmethod
     def training_batch_end(self, batch_idx):
         """This method is called at the end of batch-{batch_idx}"""
 
-    @abstractmethod
     def training_end(self):
         """This method is called at the end of complete training"""
 
@@ -261,7 +261,6 @@ class TrainingLoop(ABC, TrainerSetup):
 
         self.base_dir = args.base_dir
         self.save_epoch_dir = args.save_epoch_dir
-        self.load_dir = args.load_dir
 
         self.batch_size = args.batch_size
 
@@ -278,29 +277,33 @@ class TrainingLoop(ABC, TrainerSetup):
         self.base_dir = self._setup_basedir(self.base_dir)
         self.save_epoch_dir = self._setup_savedir(self.save_epoch_dir, self.base_dir)
 
+        self.model = model
         self.optimizer = self.setup_optimizer()
         self.scheduler = self.setup_scheduler() # TODO: save, load scheduler
-        self.model = model
 
         if self.enable_deepspeed:
             self.model, self.optimizer, self.scheduler = self.init_deepspeed(self.args, self.model, self.optimizer, self.scheduler)
 
         self.device = self.setup_hardware()
 
-        print(f"Using {self.device}")
+        print(f"[DEVICE:] {self.device}")
 
-        # load checkpoint once setup is done
+        wandb_args = {
+            "wandb_config": self.args,
+            "project_name": self.args.project_name,
+            "wandb_run_name": self.args.wandb_run_name,
+            "wandb_dir": self.base_dir
+        }
+
+        self.setup_wandb(wandb_args)
 
     def setup_hardware(self):
         # this must be called after model is feed into deepspeed
 
         device = torch.device('cpu')
 
-        if not self.enable_deepspeed and torch.cuda.is_available():
-            logger.warning("GPU is available & you are still using CPU ??")
-
         if self.enable_deepspeed:
-            device = self.model.device
+            device = self.model.local_rank
 
         return device
 
@@ -339,16 +342,6 @@ class TrainingLoop(ABC, TrainerSetup):
         tr_dataset: torch.utils.data.DataLoader,
         val_dataset: torch.utils.data.DataLoader
     ):
-
-        wandb_args = {
-            "wandb_config": self.args,
-            "wandb_resume": self.args.wandb_resume,
-            "project_name": self.args.project_name,
-            "wandb_run_name": self.args.wandb_run_name,
-            "wandb_dir": self.base_dir
-        }
-
-        self.setup_wandb(wandb_args)
 
         try:
             tr_metric, val_metric = self.train(tr_dataset, val_dataset)            
@@ -450,7 +443,7 @@ class TrainingLoop(ABC, TrainerSetup):
         else:
             self.optimizer.step()
             self.empty_grad_()
-            self.lr_scheduler.step(batch_idx) # TODO: check if its correct
+            # self.scheduler.step(batch_idx) # TODO: check if its correct
 
     def backward(self, loss):
         if self.enable_deepspeed:
@@ -471,6 +464,38 @@ class TrainingLoop(ABC, TrainerSetup):
             running_loss.append(val_loss.item())
 
         return np.mean(running_loss)
+
+    def histogram_params(self, logdir="tb_params"):
+        """
+        You need to call this method yourself
+        """
+        writer = SummaryWriter(log_dir=os.path.join(self.base_dir, logdir))
+
+        params = self.model.named_parameters()
+        for n, param in params:
+            writer.add_histogram(n, param)
+        
+        writer.close()
+        # tensorboard --logdir "{tb_params}"
+        
+    def histogram_grads(self, logdir="tb_grads"):
+        """
+        You need to call this method yourself
+
+        Remember to call this only after `.backward`
+        """
+
+        writer = SummaryWriter(log_dir=os.path.join(self.base_dir, logdir))
+
+        params = self.model.named_parameters()
+        for n, param in params:
+            if param.grad is not None:
+                writer.add_histogram(n, param.grad)
+            else:
+                writer.add_scalar(n, 0.0)
+
+        writer.close()
+        # tensorboard --logdir "{tb_grads}"
 
     def save_training_state_dict(self, save_dir: str):
 
@@ -541,101 +566,3 @@ class TrainingLoop(ABC, TrainerSetup):
     #     self.start_batch_idx = checkpoint.pop('start_batch_idx')
 
     #     print(f'loading successful (start-epoch-{self.start_epoch}, start_batch_idx-{self.start_batch_idx})')
-
-
-class Trainer(TrainingLoop):
-
-    def __init__(self, args):
-        TrainingLoop.__init__(self, args)
-
-    @abstractmethod
-    def setup_optimizer(self):
-        """
-        Return:
-            `torch.optim` object
-        """
-        return
-
-    def setup_scheduler(self):
-        """
-        Return:
-            `torch.optim.lr_scheduler` object
-        """
-        return
-
-    @abstractmethod
-    def train_on_batch(self, batch, batch_idx):
-        """
-        This method should look something like this
-
-            batch = batch.to(self.device)
-            out = self(batch)
-            loss = out.mean()
-
-            return loss
-        """
-        return
-
-    @abstractmethod
-    def evaluate_on_batch(self, batch):
-        """
-        This method should look something like this
-
-            batch = batch.to(self.device)
-            with torch.no_grad():
-                out = self(batch)
-                loss = out.mean()
-
-            return loss
-        """
-        return
-
-    def training_epoch_end(self, epoch, tr_metric, val_metric):
-        """This method is called at the end of epoch"""
-        super().training_epoch_end(epoch, tr_metric, val_metric)
-
-    def training_end(self):
-        """This method is called at the end of complete training"""
-
-    def training_batch_end(self, batch_idx):
-        """This method is called at the end of batch-{batch_idx}"""
-
-    def after_backward(self, batch_idx):
-        """This method is called just after `loss.backward()`"""
-
-    def histogram_params(self, logdir="tb_params"):
-        """
-        You need to call this method yourself
-        """
-        writer = SummaryWriter(log_dir=os.path.join(self.base_dir, logdir))
-
-        params = self.model.named_parameters()
-        for n, param in params:
-            writer.add_histogram(n, param)
-        
-        writer.close()
-        # tensorboard --logdir "{tb_params}"
-        
-    def histogram_grads(self, logdir="tb_grads"):
-        """
-        You need to call this method yourself
-
-        Remember to call this only after `.backward`
-        """
-
-        writer = SummaryWriter(log_dir=os.path.join(self.base_dir, logdir))
-
-        params = self.model.named_parameters()
-        for n, param in params:
-            if param.grad is not None:
-                writer.add_histogram(n, param.grad)
-            else:
-                writer.add_scalar(n, 0.0)
-
-        writer.close()
-        # tensorboard --logdir "{tb_grads}"
-
-
-if __name__ == '__main__':
-
-    print("Life is so simple now :)")

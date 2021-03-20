@@ -6,32 +6,6 @@ from datasets import load_dataset
 import quick
 from dataclasses import dataclass
 
-
-@dataclass
-class TrainingArgs(quick.TrainingArgs):
-
-    lr: float = 1.e-5
-    batch_size: int = 1
-    max_epochs: int = 10
-    accumulation_steps: int = 8
-
-    num_workers: int = 2
-    max_length: int = 512
-    max_target_length: int = 32
-    process_on_fly: bool = False
-    seed: int = 42
-    n_augment: int = 2
-
-    file_path: str = "data/dev_data_article.csv"
-    pretrained_model_id: str = "facebook/mbart-large-cc25"
-    pretrained_tokenizer_id: str = "facebook/mbart-large-cc25"
-    weights_dir: str = "test-quick"
-
-    base_dir: str = "test-quick"
-    wandb_run_name: str = "test-quick"
-    project_name: str = "interiit-mbart"
-
-
 class DataLoader(object):
 
     def __init__(self, tokenizer, args):
@@ -96,10 +70,10 @@ class DataLoader(object):
 class Trainer(quick.Trainer):
 
     def __init__(self, model, args):
-        self.lr = args.lr
-
-        self.setup(model)
         super().__init__(args)
+
+        self.lr = args.lr
+        self.setup(model)
 
     def setup_optimizer(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)
@@ -124,20 +98,41 @@ class Trainer(quick.Trainer):
         if self.args.weights_dir:
             self.model.save_pretrained(os.path.join(self.args.base_dir, self.args.weights_dir+f"-e{epoch}"))
 
+@dataclass
+class TrainingArgs(quick.TrainingArgs):
 
-if __name__ == '__main__':
+    lr: float = 1.e-5
+    batch_size: int = 1
+    max_epochs: int = 10
+    accumulation_steps: int = 8
+
+    num_workers: int = 2
+    max_length: int = 512
+    max_target_length: int = 32
+    process_on_fly: bool = False
+    seed: int = 42
+    n_augment: int = 2
+
+    file_path: str = "examples/data/dev_data_article.csv"
+    pretrained_model_id: str = "facebook/mbart-large-cc25"
+    pretrained_tokenizer_id: str = "facebook/mbart-large-cc25"
+    weights_dir: str = "test-quick"
+
+    base_dir: str = "test-quick"
+    wandb_run_name: str = "test-quick"
+    project_name: str = "interiit-mbart"
+
+if __name__ == "__main__":
 
     args = TrainingArgs()
-
     model = MBartForConditionalGeneration.from_pretrained(args.pretrained_model_id)
     tokenizer = MBartTokenizer.from_pretrained(args.pretrained_tokenizer_id)
-
     dl = DataLoader(tokenizer, args)
     tr_dataset, val_dataset = dl.setup()
     print(tr_dataset, val_dataset)
 
     tr_dataset = dl.train_dataloader(tr_dataset)
     val_dataset = dl.val_dataloader(val_dataset)
-
     trainer = Trainer(model, args)
+
     trainer.fit(tr_dataset, val_dataset)
