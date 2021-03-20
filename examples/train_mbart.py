@@ -21,7 +21,7 @@ class DataLoader(object):
         self.tokenizer = tokenizer
         self.sep_token = self.tokenizer.convert_ids_to_tokens(self.tokenizer.sep_token_id)
 
-    def setup(self, ):
+    def setup(self):
 
         data = load_dataset("csv", data_files=self.file_path)["train"]
         data = data.map(lambda x: {"CleanedHeadline": x["Headline"]})
@@ -67,7 +67,7 @@ class DataLoader(object):
         return features
 
 
-class Trainer(quick.Trainer):
+class Trainer(quick.TorchTrainer):
 
     def __init__(self, model, args):
         super().__init__(args)
@@ -99,7 +99,7 @@ class Trainer(quick.Trainer):
             self.model.save_pretrained(os.path.join(self.args.base_dir, self.args.weights_dir+f"-e{epoch}"))
 
 @dataclass
-class TrainingArgs(quick.TrainingArgs):
+class TrainingArgs(quick.TorchTrainingArgs):
 
     lr: float = 1.e-5
     batch_size: int = 1
