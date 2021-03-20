@@ -3,3 +3,4 @@ torch
 tensorboard
 wandb
 tqdm
+deepspeed

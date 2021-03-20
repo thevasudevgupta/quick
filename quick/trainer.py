@@ -65,15 +65,14 @@ USAGE:
 class TrainingArgs:
 
     lr: float = 5e-5
-    train_batch_size: int = 8
-    accumulation_steps: int = 1 # TODO: fix this
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 1
     max_epochs: int = 5
 
     base_dir: str = None
-    load_dir: str = None
     save_epoch_dir: str = None
 
-    local_rank: int = -1 # check this
+    local_rank: int = -1
     enable_deepspeed: bool = False
 
     project_name: str = "Quick-project"
@@ -223,11 +222,11 @@ class TrainingLoop(ABC, TrainerSetup):
         """This method must be implemented in the class inherited from this class"""
 
     @abstractmethod
-    def train_batch(self, **kwargs):
+    def train_on_batch(self, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
     @abstractmethod
-    def validate_batch(self, **kwargs):
+    def evaluate_on_batch(self, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
     @abstractmethod
@@ -259,12 +258,12 @@ class TrainingLoop(ABC, TrainerSetup):
         self.enable_deepspeed = args.enable_deepspeed
         self.map_location = args.map_location
         self.max_epochs = args.max_epochs
+
         self.base_dir = args.base_dir
         self.save_epoch_dir = args.save_epoch_dir
+        self.load_dir = args.load_dir
 
         self.batch_size = args.batch_size
-
-        self.load_dir = args.load_dir
 
         self.early_stop_n = args.early_stop_n
         self.epoch_saving_n = args.epoch_saving_n
@@ -286,13 +285,11 @@ class TrainingLoop(ABC, TrainerSetup):
         if self.enable_deepspeed:
             self.model, self.optimizer, self.scheduler = self.init_deepspeed(self.args, self.model, self.optimizer, self.scheduler)
 
-        if self.load_dir:
-            self.load_model_state_dict(os.path.join(self.base_dir, self.load_dir))
-            self.load_training_state_dict(self.load_dir)
-
         self.device = self.setup_hardware()
 
         print(f"Using {self.device}")
+
+        # load checkpoint once setup is done
 
     def setup_hardware(self):
         # this must be called after model is feed into deepspeed
@@ -318,7 +315,8 @@ class TrainingLoop(ABC, TrainerSetup):
         assert hasattr(args, "local_rank"), "You must pass `local_rank` in `args`"
 
         ds_config = {
-            "train_batch_size": args.train_batch_size,
+            "train_batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
         }
 
         model_parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -331,10 +329,10 @@ class TrainingLoop(ABC, TrainerSetup):
         return model, optimizer, lr_scheduler
 
     def training_step(self, batch, batch_idx):
-        return self.train_batch(batch, batch_idx)
+        return self.train_on_batch(batch, batch_idx)
 
     def validation_step(self, batch):
-        return self.validate_batch(batch)
+        return self.evaluate_on_batch(batch)
 
     def fit(
         self,
@@ -476,6 +474,9 @@ class TrainingLoop(ABC, TrainerSetup):
 
     def save_training_state_dict(self, save_dir: str):
 
+        if self.enable_deepspeed:
+            logger.warning("Currently saving training_state_dict won't work with deepspeed")
+
         path = os.path.join(save_dir, "training.tar")
 
         # defining what all to save
@@ -502,44 +503,44 @@ class TrainingLoop(ABC, TrainerSetup):
         else:
             torch.save(state_dict, path)
 
-    def load_model_state_dict(self, load_dir: str):
+    # def load_model_state_dict(self, load_dir: str):
 
-        path = os.path.join(load_dir, "pytorch_model.bin")
-        """
-        Note:
-            `map_function` will be very memory expensive if you are changing the device
-        """
+    #     path = os.path.join(load_dir, "pytorch_model.bin")
+    #     """
+    #     Note:
+    #         `map_function` will be very memory expensive if you are changing the device
+    #     """
 
-        print(
-            """loading:
-                1) model state_dict
-            """
-        )
+    #     print(
+    #         """loading:
+    #             1) model state_dict
+    #         """
+    #     )
 
-        model = torch.load(path, map_location=self.map_location)
-        self.model.load_state_dict(model)        
+    #     model = torch.load(path, map_location=self.map_location)
+    #     self.model.load_state_dict(model)        
 
-    def load_training_state_dict(self, load_dir: str):
+    # def load_training_state_dict(self, load_dir: str):
         
-        path = os.path.join(load_dir, "training.tar")
+    #     path = os.path.join(load_dir, "training.tar")
 
-        print(
-            """Loading:
-                1) optimizer state_dict
-                2) scheduler state_dict
-                3) start_epoch
-                4) start_batch_idx
-            """
-            )
+    #     print(
+    #         """Loading:
+    #             1) optimizer state_dict
+    #             2) scheduler state_dict
+    #             3) start_epoch
+    #             4) start_batch_idx
+    #         """
+    #         )
 
-        checkpoint = torch.load(path)
-        self.optimizer.load_state_dict(checkpoint.pop('optimizer'))
+    #     checkpoint = torch.load(path)
+    #     self.optimizer.load_state_dict(checkpoint.pop('optimizer'))
 
-        # helpful in resuming training from particular step
-        self.start_epoch = checkpoint.pop('start_epoch')
-        self.start_batch_idx = checkpoint.pop('start_batch_idx')
+    #     # helpful in resuming training from particular step
+    #     self.start_epoch = checkpoint.pop('start_epoch')
+    #     self.start_batch_idx = checkpoint.pop('start_batch_idx')
 
-        print(f'loading successful (start-epoch-{self.start_epoch}, start_batch_idx-{self.start_batch_idx})')
+    #     print(f'loading successful (start-epoch-{self.start_epoch}, start_batch_idx-{self.start_batch_idx})')
 
 
 class Trainer(TrainingLoop):
@@ -563,7 +564,7 @@ class Trainer(TrainingLoop):
         return
 
     @abstractmethod
-    def train_batch(self, batch, batch_idx):
+    def train_on_batch(self, batch, batch_idx):
         """
         This method should look something like this
 
@@ -576,7 +577,7 @@ class Trainer(TrainingLoop):
         return
 
     @abstractmethod
-    def validate_batch(self, batch):
+    def evaluate_on_batch(self, batch):
         """
         This method should look something like this
 
