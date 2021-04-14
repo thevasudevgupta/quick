@@ -16,9 +16,6 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-if not torch.cuda.is_available():
-    logger.warning("[Quick WARNING] CUDA is not available => Training will happen on CPU")
-
 """
 USAGE:
 
@@ -46,7 +43,7 @@ USAGE:
                 '''
                 return
 
-    >>> args = quick.TorchTrainingArgs()
+    >>> args = quick.TrainingArgs()
     >>> trainer = quick.TorchTrainer(args)
     >>> trainer.setup(model)
 
@@ -54,7 +51,7 @@ USAGE:
 """
 
 @dataclass
-class TorchTrainingArgs:
+class TrainingArgs:
 
     lr: float = 5e-5
     batch_size: int = 8
@@ -62,40 +59,42 @@ class TorchTrainingArgs:
     max_epochs: int = 5
 
     base_dir: str = None
-    save_epoch_dir: str = None
+    save_strategy: str = "epoch" # None
 
     project_name: str = "Quick-project"
     wandb_run_name: str = None
 
-    map_location: str = "cuda:0"
     early_stop_n: int = None
     epoch_saving_n: int = 3
 
     precision: str = "float32"
 
     def __post_init__(self):
+        if not torch.cuda.is_available():
+            logger.warning("[Quick WARNING] CUDA is not available => Training will happen on CPU")
 
-        self.base_dir = "." if self.base_dir is None else self.base_dir
         self.map_location = torch.device(self.map_location)
+        self.base_dir = self._setup_dir(self.base_dir)
 
         if self.precision == "mixed16":
-            logger.wanrning("[Quick WARNING] mixed precision training is not supported curreltly, Setting `precision='mixed16'`")
+            if not torch.cuda.is_available():
+                raise ValueError('CUDA is not available')
+            logger.warning("[Quick WARNING] mixed precision training is not supported currently, Setting `precision='mixed16'`")
 
-        print(f"[Quick EXPERIMENT DIRECTORY] {self.base_dir}")
+        if self.save_strategy is None:
+            logger.warning("[Quick WARNING] You are not saving anything")
 
-        if self.save_epoch_dir is not None:
-            print("[Quick MODEL EPOCHS DIRECTORY] {}".format(os.path.join(self.base_dir, self.save_epoch_dir)))
-        else:
-            logger.warning("[Quick WARNING] You are not saving weights after every epoch.")
-        # training stuff will be in `training.tar`
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device('cpu')
+
+    @staticmethod
+    def _setup_dir(base_dir: str):
+        base_dir = "." if not isinstance(base_dir, str) else base_dir
+        if not os.path.isdir(base_dir):
+            os.mkdir(base_dir)
+        return base_dir
 
 
 class TrainerSetup(object):
-
-    def __init__(self):
-        """
-        This class is mainly having setup methods for enable training
-        """
 
     @staticmethod
     def assert_epoch_saving(val_metric: list, n: int = 3, mode: str = "min"):
@@ -149,29 +148,6 @@ class TrainerSetup(object):
         status = self.assert_early_stop(val_metric, n, mode)
         if status:
             raise KeyboardInterrupt("Model training stopped due to early-stopping")
-
-    @staticmethod
-    def _sanity_check(args: TorchTrainingArgs):
-        if not isinstance(args, TorchTrainingArgs):
-            raise ValueError("Your argument class must be inherited from TrainingArgs")
-
-    @staticmethod
-    def _setup_savedir(save_dir: str, base_dir: str):
-        if save_dir:
-            if save_dir not in os.listdir(base_dir):
-                os.mkdir(os.path.join(base_dir, save_dir))
-            return save_dir
-        return save_dir
-
-    @staticmethod
-    def _setup_basedir(base_dir: str):
-        if base_dir is None:
-            return "."
-        elif base_dir == ".":
-            return base_dir
-        elif base_dir not in os.listdir():
-            os.mkdir(base_dir)
-            return base_dir
 
     @staticmethod
     def setup_wandb(args: dict):
@@ -244,12 +220,14 @@ class TorchTrainer(ABC, TrainerSetup):
             save_status = self.assert_epoch_saving(val_metric, n=self.epoch_saving_n, mode="min")
         if save_status:
             self.save_model_state_dict(os.path.join(self.base_dir, self.save_epoch_dir+f"-e{epoch}"))
-            self.save_training_state_dict(self.base_dir)
+            self.save_training_state(self.base_dir)
 
-    def __init__(self, args: TorchTrainingArgs):
+    def __init__(self, args: TrainingArgs):
         super().__init__()
 
-        self._sanity_check(args)
+        self.base_dir = args.base_dir
+        self.save_epoch_dir = args.save_epoch_dir
+        self.device = args.device
 
         self.map_location = args.map_location
         self.max_epochs = args.max_epochs
@@ -271,49 +249,27 @@ class TorchTrainer(ABC, TrainerSetup):
         self.args = args
 
     def setup(self, model: nn.Module):
-
-        self.base_dir = self._setup_basedir(self.base_dir)
-        self.save_epoch_dir = self._setup_savedir(self.save_epoch_dir, self.base_dir)
-
-        self.device = self.setup_hardware()
-        print(f"[Quick DEVICE] {self.device}")
-
         self.model = model
-        self.model.to(self.device)
+        if torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
+        else:
+            self.model.to(self.device)
 
         self.optimizer = self.setup_optimizer()
         self.scheduler = self.setup_scheduler()
-        self.scaler = self.setup_scaler()
+        self.scaler = torch.cuda.amp.GradScaler() if self.precision == 'mixed16' else None
 
         wandb_args = {
-            "wandb_config": self.args,
+            "wandb_config": self.args.__dict__,
             "project_name": self.args.project_name,
             "wandb_run_name": self.args.wandb_run_name,
             "wandb_dir": self.base_dir
         }
-
-        self.setup_wandb(wandb_args)
-
-    def setup_scaler(self):
-        if self.precision == 'mixed16':
-            if not torch.cuda.is_available():
-                raise ValueError('CUDA is not available')
-            logger.info('Training with mixed16')
-            return torch.cuda.amp.GradScaler()
-
-    def setup_hardware(self):
-        device = torch.device('cpu')
-
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-
-        return device
+        self.logger = self.setup_wandb(wandb_args)
 
     def training_step(self, batch, batch_idx):
-
         if self.precision == 'mixed16':
             return torch.cuda.amp.autocast(self.train_on_batch)(batch, batch_idx)
-
         return self.train_on_batch(batch, batch_idx)
 
     def validation_step(self, batch):
@@ -322,16 +278,21 @@ class TorchTrainer(ABC, TrainerSetup):
     def fit(
         self,
         tr_dataset: torch.utils.data.DataLoader,
-        val_dataset: torch.utils.data.DataLoader
+        val_dataset: torch.utils.data.DataLoader,
+        resume_from_checkpoint: bool = False,
+        map_location: str = "cuda:0",
     ):
+
+        if resume_from_checkpoint:
+            print("Resuming from checkpoint")
+            raise NotImplementedError
 
         try:
             tr_metric, val_metric = self.train(tr_dataset, val_dataset)            
             self.display_metrics(self.max_epochs, tr_metric, val_metric)
-
         except KeyboardInterrupt:
             logger.warning('Interrupting through keyboard ======= Saving model weights')
-            self.save_model_state_dict(os.path.join(self.base_dir, "keyboard-interrupted-weights"))
+            torch.save(self.model.state_dict(), os.path.join(self.base_dir, "KeyboardInterrupted-wts.bin"))
 
     @torch.no_grad()
     def empty_grad_(self):
@@ -375,7 +336,7 @@ class TorchTrainer(ABC, TrainerSetup):
                 loss /= self.gradient_accumulation_steps
 
                 # accumulating tr_loss for logging (helpful when accumulation-steps > 1)
-                tr_loss += loss.item()
+                tr_loss += loss.item() # this should be loss.detach() if using TPUs
 
                 # configuring for mixed-precision
                 if self.precision == 'mixed16':
@@ -390,7 +351,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
                     self.optimizer_step(batch_idx, epoch)
 
-                    wandb.log({
+                    self.logger.log({
                     'global_steps': steps,
                     'step_tr_loss': tr_loss,
                     'learning_rate': self.optimizer.param_groups[0]["lr"],
@@ -413,7 +374,7 @@ class TorchTrainer(ABC, TrainerSetup):
             # val_loss at training epoch end for logging
             val_loss = self.evaluate(val_dataset, show_progress=True)
 
-            wandb.log({
+            self.logger.log({
                 'epoch': epoch,
                 'tr_loss': np.mean(losses),
                 'val_loss': val_loss
@@ -490,66 +451,42 @@ class TorchTrainer(ABC, TrainerSetup):
         writer.close()
         # tensorboard --logdir "{tb_grads}"
 
-    def save_training_state_dict(self, save_dir: str):
+    def save_optimizer_state_dict(self, ckpt_dir: str):
+        path = os.path.join(ckpt_dir, "optimizer.pt")
+        torch.save(self.optimizer.state_dict(), path)
 
-        path = os.path.join(save_dir, "training.tar")
-
-        # defining what all to save
-        state_dict = {
-            'optimizer': self.optimizer.state_dict(),
-            'start_epoch': self.start_epoch,
-            'start_batch_idx':  self.start_batch_idx,
+    def save_training_state(self, ckpt_dir: str):
+        path = os.path.join(ckpt_dir, "training_state.txt")
+        with open(path, "a") as f:
+            content = {
+                "start_epoch": self.start_epoch,
+                "start_batch_idx": self.start_batch_idx,
             }
+            f.write(str(content)+"\n")
 
+    def save_scheduler_state_dict(self, ckpt_dir: str):
+        path = os.path.join(ckpt_dir, "scheduler.pt")
         if self.scheduler is not None:
-            state_dict.update({
-                "scheduler": self.scheduler.state_dict(),
-            })
-
-        torch.save(state_dict, path)
+            torch.save(self.scheduler.state_dict(), path)
 
     def save_model_state_dict(self, save_dir: str):
-
         path = os.path.join(save_dir, "pytorch_model.bin")
-        state_dict = self.model.state_dict()
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        torch.save(model.state_dict(), path)
 
-        torch.save(state_dict, path)
-
-    def load_model_state_dict(self, load_dir: str):
-
+    def load_model_state_dict(self, load_dir: str, map_location: str):
+        """`map_function` will be very memory expensive if you are changing the device"""
         path = os.path.join(load_dir, "pytorch_model.bin")
-        """
-        Note:
-            `map_function` will be very memory expensive if you are changing the device
-        """
+        model = torch.load(path, map_location=map_location)
+        self.model.load_state_dict(model)
 
-        print(
-            """loading:
-                1) model state_dict
-            """
-        )
+    # def load_training_state_dict(self, load_dir: str):
+    #     path = os.path.join(load_dir, "training.tar")
+    #     checkpoint = torch.load(path)
+    #     self.optimizer.load_state_dict(checkpoint.pop('optimizer'))
 
-        model = torch.load(path, map_location=self.map_location)
-        self.model.load_state_dict(model)        
+    #     # helpful in resuming training from particular step
+    #     self.start_epoch = checkpoint.pop('start_epoch')
+    #     self.start_batch_idx = checkpoint.pop('start_batch_idx')
 
-    def load_training_state_dict(self, load_dir: str):
-        
-        path = os.path.join(load_dir, "training.tar")
-
-        print(
-            """Loading:
-                1) optimizer state_dict
-                2) scheduler state_dict
-                3) start_epoch
-                4) start_batch_idx
-            """
-            )
-
-        checkpoint = torch.load(path)
-        self.optimizer.load_state_dict(checkpoint.pop('optimizer'))
-
-        # helpful in resuming training from particular step
-        self.start_epoch = checkpoint.pop('start_epoch')
-        self.start_batch_idx = checkpoint.pop('start_batch_idx')
-
-        print(f'loading successful (start-epoch-{self.start_epoch}, start_batch_idx-{self.start_batch_idx})')
+    #     print(f'loading successful (start-epoch-{self.start_epoch}, start_batch_idx-{self.start_batch_idx})')
