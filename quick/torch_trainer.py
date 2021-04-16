@@ -16,6 +16,11 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+try:
+    import deepspeed
+except:
+    logger.warning("DeepSpeed is not available => run `pip3 install deepspeed`")
+
 """
 USAGE:
 
@@ -51,6 +56,19 @@ USAGE:
 """
 
 @dataclass
+class DeepSpeedPlugin:
+
+    enable_deepspeed: bool
+    fp16: dict =  {
+            "enabled": True,
+            "loss_scale": 0,
+            "initial_scale_power": 32,
+            "loss_scale_window": 1000,
+            "hysteresis": 2,
+            "min_loss_scale": 1
+            }
+
+@dataclass
 class TrainingArgs:
 
     lr: float = 5e-5
@@ -68,6 +86,8 @@ class TrainingArgs:
     epoch_saving_n: int = 3
 
     precision: str = "float32"
+
+    deepspeed_plugin: DeepSpeedPlugin = DeepSpeedPlugin(enable_deepspeed=False)
 
     def __post_init__(self):
         if not torch.cuda.is_available():
@@ -474,11 +494,20 @@ class TorchTrainer(ABC, TrainerSetup):
         model = self.model.module if hasattr(self.model, "module") else self.model
         torch.save(model.state_dict(), path)
 
+    def save_checkpoint(self, ckpt_dir: str):
+        self.save_model_state_dict(ckpt_dir)
+        self.save_training_state(ckpt_dir)
+        self.save_optimizer_state_dict(ckpt_dir)
+        self.save_scheduler_state_dict(ckpt_dir)
+
     def load_model_state_dict(self, load_dir: str, map_location: str):
         """`map_function` will be very memory expensive if you are changing the device"""
         path = os.path.join(load_dir, "pytorch_model.bin")
         model = torch.load(path, map_location=map_location)
         self.model.load_state_dict(model)
+
+    def load_checkpoint(self, ckpt_dir: str):
+        raise NotImplementedError
 
     # def load_training_state_dict(self, load_dir: str):
     #     path = os.path.join(load_dir, "training.tar")
@@ -490,3 +519,160 @@ class TorchTrainer(ABC, TrainerSetup):
     #     self.start_batch_idx = checkpoint.pop('start_batch_idx')
 
     #     print(f'loading successful (start-epoch-{self.start_epoch}, start_batch_idx-{self.start_batch_idx})')
+
+
+class DeepSpeedTrainer(TorchTrainer):
+
+    def training_epoch_end(self, epoch, tr_metric, val_metric):
+        """This method is called at the end of epoch"""
+        if self.save_strategy == "epoch":
+            self.save_checkpoint(os.path.join(self.base_dir, self.save_epoch_dir + f"-{epoch}"))
+
+    def setup(self, model: nn.Module):
+        super().setup(model)
+        if self.enable_deepspeed:
+            self.model, self.optimizer, self.scheduler = self.init_deepspeed(self.model)
+
+    def init_deepspeed(
+        self,
+        model: nn.Module,
+    ):
+        assert isinstance(model, nn.Module), "model must be instance of `nn.Module`"
+        assert hasattr(self.args.deepspeed_plugin, "local_rank"), "You must pass `local_rank` in `args`"
+
+        ds_config = {
+            "optimizer": self.optimizer,
+            "scheduler": self.scheduler,
+        }
+        ds_config.update(self.args.deepspeed_plugin.__dict__)
+
+        model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+
+        model, optimizer, _, scheduler = deepspeed.initialize(
+            args=self.args.deepspeed_plugin, model=model, model_parameters=model_parameters, config_params=ds_config,
+        )
+
+        return model, optimizer, scheduler
+
+    def train(self, tr_dataset, val_dataset):
+
+        tr_metric = []
+        val_metric = []
+
+        steps = 0 # updating under accumulation condition
+
+        # setting up epochs (handling resuming)
+        epochs = range(self.start_epoch, self.max_epochs)
+        for epoch in epochs:
+
+            # setting up tr_loss for accumulation
+            tr_loss = 0
+            losses = []
+
+            # helping in resuming
+            self.start_epoch = epoch
+
+            # setting up progress bar to display
+            desc = f"running epoch-{epoch}"
+            pbar = tqdm(enumerate(tr_dataset), total=len(tr_dataset), desc=desc, initial=0, leave=False)
+            for batch_idx, batch in pbar:
+
+                # will help in resuming training from last-saved batch_idx
+                if batch_idx != self.start_batch_idx:
+                    steps += 1
+                    pbar.write(f'training will start from batch_idx-{self.start_batch_idx}')
+                    continue
+
+                self.start_batch_idx += 1
+
+                self.model.train(True)
+                # simply doing forward-propogation
+                loss = self.training_step(batch, batch_idx)
+
+                # accumulating tr_loss for logging (helpful when accumulation-steps > 1)
+                tr_loss = loss.item()
+                self.backward(loss)
+                self.after_backward(batch_idx)
+
+                self.optimizer_step(batch_idx, epoch) # update parameters, learning_rate
+
+                wandb.log({
+                    'global_steps': steps,
+                    'step_tr_loss': tr_loss,
+                    'learning_rate': self.optimizer.param_groups[0]["lr"],
+                }, commit=True)
+
+                steps += 1
+                pbar.set_postfix(tr_loss=tr_loss)
+
+                # accumulating losses for training-loss at epoch end
+                losses.append(tr_loss)
+
+                self.training_batch_end(batch_idx)
+
+            # clearing batch_idx for next epoch
+            self.start_batch_idx = 0
+
+            # val_loss at training epoch end for logging
+            val_loss = self.evaluate(val_dataset, show_progress=True)
+
+            wandb.log({
+                'epoch': epoch,
+                'tr_loss': np.mean(losses),
+                'val_loss': val_loss
+                }, commit=False)
+
+            tr_metric.append(np.mean(losses))
+            val_metric.append(val_loss)
+
+            self.training_epoch_end(epoch, tr_metric, val_metric)
+            if self.early_stop_n:
+                self.stop_early(val_metric, self.early_stop_n, model="min")
+
+        self.start_epoch += 1
+        self.training_end()
+    
+        return tr_metric, val_metric
+
+    def optimizer_step(self, batch_idx, epoch):
+        self.model.step()
+
+    def backward(self, loss):
+        self.model.backward(loss)
+
+    def save_checkpoint(self, save_dir: str):
+        client_state = {
+                "start_epoch": self.start_epoch,
+                "start_batch_idx": self.start_batch_idx,
+            }
+        self.model.save_checkpoint(save_dir, client_state)
+
+    def load_checkpoint(self, ckpt_dir: str):
+        path, client_state = self.model.load_checkpoint(ckpt_dir)
+        logger.info(client_state)
+        return path
+
+    def setup_optimizer(self):
+        return {
+            "type": "Adam",
+            "params": {
+            "lr": 0.001,
+            "betas": [
+                0.8,
+                0.999
+            ],
+            "eps": 1e-8,
+            "weight_decay": 3e-7
+            }
+        }
+
+    def setup_scheduler(self):
+
+        return {
+            "type": "WarmupLR",
+            "params": {
+                "warmup_min_lr": 0,
+                "warmup_max_lr": 0.001,
+                "warmup_num_steps": 1000
+            }
+        }
