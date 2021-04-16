@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import wandb
 import logging
@@ -16,17 +16,20 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+
 try:
     import deepspeed
+    DEEPSPEED_INSTALLATION_STATUS = True
 except:
-    logger.warning("DeepSpeed is not available => run `pip3 install deepspeed`")
+    logger.warning("DeepSpeed is not available => run `pip3 install deepspeed` if you want to use DeepSpeed")
+    DEEPSPEED_INSTALLATION_STATUS = False
 
 """
 USAGE:
 
     >>> import quick
 
-    >>> class Trainer(quick.Trainer):
+    >>> class Trainer(quick.TorchTrainer):
             def __init__(self, args: TrainingArgs):
                 super().__init__(args)
 
@@ -36,13 +39,13 @@ USAGE:
                 '''
                 return
 
-            def train_batch(self, batch, batch_idx):
+            def train_on_batch(self, batch, batch_idx):
                 '''
                     ....
                 '''
                 return
 
-            def validate_batch(self, batch):
+            def evaluate_on_batch(self, batch):
                 '''
                     ....
                 '''
@@ -59,24 +62,43 @@ USAGE:
 class DeepSpeedPlugin:
 
     enable_deepspeed: bool
-    fp16: dict =  {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 32,
-            "loss_scale_window": 1000,
-            "hysteresis": 2,
-            "min_loss_scale": 1
-            }
+    # these args will hold only if enable_deepspeed = True
+
+    local_rank: int  = 0
+    train_batch_size: int = None
+    gradient_accumulation_steps: int = None
+
+    fp16: tuple = (
+        ("enabled", True),
+        ("loss_scale", 0),
+        ("initial_scale_power", 32),
+        ("loss_scale_window", 1000),
+        ("hysteresis", 2),
+        ("min_loss_scale", 1),
+    )
+
+    def __post_init__(self):
+        for attr_name in ["fp16"]:
+            if isinstance(getattr(self, attr_name), tuple):
+                temp = {}
+                for k, v in getattr(self, attr_name):
+                    temp[k] = v
+                setattr(self, attr_name, temp)
+            assert isinstance(getattr(self, attr_name), dict), f"{attr_name} must be dict"
+
 
 @dataclass
 class TrainingArgs:
 
-    lr: float = 5e-5
+    # unused
     batch_size: int = 8
-    gradient_accumulation_steps: int = 1
-    max_epochs: int = 5
+    lr: float = 5e-5
 
-    base_dir: str = None
+    gradient_accumulation_steps: int = 1
+    precision: str = "float32"
+
+    max_epochs: int = 5
+    output_dir: str = None # everything related to the experiment will be saved here
     save_strategy: str = "epoch" # None
 
     project_name: str = "Quick-project"
@@ -85,16 +107,13 @@ class TrainingArgs:
     early_stop_n: int = None
     epoch_saving_n: int = 3
 
-    precision: str = "float32"
-
     deepspeed_plugin: DeepSpeedPlugin = DeepSpeedPlugin(enable_deepspeed=False)
 
     def __post_init__(self):
         if not torch.cuda.is_available():
             logger.warning("[Quick WARNING] CUDA is not available => Training will happen on CPU")
 
-        self.map_location = torch.device(self.map_location)
-        self.base_dir = self._setup_dir(self.base_dir)
+        self.output_dir = self._setup_dir(self.output_dir)
 
         if self.precision == "mixed16":
             if not torch.cuda.is_available():
@@ -104,14 +123,27 @@ class TrainingArgs:
         if self.save_strategy is None:
             logger.warning("[Quick WARNING] You are not saving anything")
 
-        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
+
+        # setting up deepspeed plugin
+        self.deepspeed_plugin = replace(
+            self.deepspeed_plugin,
+            train_batch_size=self.batch_size * self.gradient_accumulation_steps,
+            gradient_accumulation_steps=self.gradient_accumulation_steps
+        )
+
+        if self.deepspeed_plugin.enable_deepspeed:
+            self.precision = None
+            self.batch_size = None
+            self.gradient_accumulation_steps = None
+            assert DEEPSPEED_INSTALLATION_STATUS, "DeepSpeed not installed => Run `pip3 install deepspeed`"
 
     @staticmethod
-    def _setup_dir(base_dir: str):
-        base_dir = "." if not isinstance(base_dir, str) else base_dir
-        if not os.path.isdir(base_dir):
-            os.mkdir(base_dir)
-        return base_dir
+    def _setup_dir(output_dir: str):
+        output_dir = "." if not isinstance(output_dir, str) else output_dir
+        if not os.path.isdir(output_dir):
+            os.mkdir(output_dir)
+        return output_dir
 
 
 class TrainerSetup(object):
@@ -235,18 +267,13 @@ class TorchTrainer(ABC, TrainerSetup):
 
     def training_epoch_end(self, epoch, tr_metric, val_metric):
         """This method is called at the end of epoch"""
-        save_status = None
-        if self.save_epoch_dir:
-            save_status = self.assert_epoch_saving(val_metric, n=self.epoch_saving_n, mode="min")
-        if save_status:
-            self.save_model_state_dict(os.path.join(self.base_dir, self.save_epoch_dir+f"-e{epoch}"))
-            self.save_training_state(self.base_dir)
+        if self.save_strategy == "epoch":
+            self.save_checkpoint(os.path.join(self.output_dir, f"checkpoint-e{epoch}"))
 
     def __init__(self, args: TrainingArgs):
         super().__init__()
 
-        self.base_dir = args.base_dir
-        self.save_epoch_dir = args.save_epoch_dir
+        self.output_dir = args.output_dir
         self.device = args.device
 
         self.map_location = args.map_location
@@ -255,10 +282,8 @@ class TorchTrainer(ABC, TrainerSetup):
         self.precision = args.precision
         self.gradient_accumulation_steps = args.gradient_accumulation_steps
 
-        self.base_dir = args.base_dir
-        self.save_epoch_dir = args.save_epoch_dir
-
-        self.batch_size = args.batch_size
+        self.output_dir = args.output_dir
+        self.save_strategy = args.save_strategy
 
         self.early_stop_n = args.early_stop_n
         self.epoch_saving_n = args.epoch_saving_n
@@ -283,12 +308,12 @@ class TorchTrainer(ABC, TrainerSetup):
             "wandb_config": self.args.__dict__,
             "project_name": self.args.project_name,
             "wandb_run_name": self.args.wandb_run_name,
-            "wandb_dir": self.base_dir
+            "wandb_dir": self.output_dir
         }
         self.logger = self.setup_wandb(wandb_args)
 
     def training_step(self, batch, batch_idx):
-        if self.precision == 'mixed16':
+        if self.scaler is not None:
             return torch.cuda.amp.autocast(self.train_on_batch)(batch, batch_idx)
         return self.train_on_batch(batch, batch_idx)
 
@@ -299,20 +324,20 @@ class TorchTrainer(ABC, TrainerSetup):
         self,
         tr_dataset: torch.utils.data.DataLoader,
         val_dataset: torch.utils.data.DataLoader,
-        resume_from_checkpoint: bool = False,
+        checkpoint_dir: str = None,
         map_location: str = "cuda:0",
     ):
 
-        if resume_from_checkpoint:
+        if checkpoint_dir is not None:
             print("Resuming from checkpoint")
-            raise NotImplementedError
+            self.load_checkpoint(checkpoint_dir)
 
         try:
             tr_metric, val_metric = self.train(tr_dataset, val_dataset)            
             self.display_metrics(self.max_epochs, tr_metric, val_metric)
         except KeyboardInterrupt:
             logger.warning('Interrupting through keyboard ======= Saving model weights')
-            torch.save(self.model.state_dict(), os.path.join(self.base_dir, "KeyboardInterrupted-wts.bin"))
+            torch.save(self.model.state_dict(), os.path.join(self.output_dir, "KeyboardInterrupted-wts.bin"))
 
     @torch.no_grad()
     def empty_grad_(self):
@@ -359,7 +384,7 @@ class TorchTrainer(ABC, TrainerSetup):
                 tr_loss += loss.item() # this should be loss.detach() if using TPUs
 
                 # configuring for mixed-precision
-                if self.precision == 'mixed16':
+                if self.scaler is not None:
                     loss = self.scaler.scale(loss)
 
                 loss.backward()
@@ -414,7 +439,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
     def optimizer_step(self, batch_idx, epoch):
         # configuring for mixed-precision
-        if self.precision == 'mixed16':
+        if self.scaler is not None:
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
@@ -443,7 +468,7 @@ class TorchTrainer(ABC, TrainerSetup):
         """
         You need to call this method yourself
         """
-        writer = SummaryWriter(log_dir=os.path.join(self.base_dir, logdir))
+        writer = SummaryWriter(log_dir=os.path.join(self.output_dir, logdir))
 
         params = self.model.named_parameters()
         for n, param in params:
@@ -459,7 +484,7 @@ class TorchTrainer(ABC, TrainerSetup):
         Remember to call this only after `.backward`
         """
 
-        writer = SummaryWriter(log_dir=os.path.join(self.base_dir, logdir))
+        writer = SummaryWriter(log_dir=os.path.join(self.output_dir, logdir))
 
         params = self.model.named_parameters()
         for n, param in params:
@@ -526,12 +551,11 @@ class DeepSpeedTrainer(TorchTrainer):
     def training_epoch_end(self, epoch, tr_metric, val_metric):
         """This method is called at the end of epoch"""
         if self.save_strategy == "epoch":
-            self.save_checkpoint(os.path.join(self.base_dir, self.save_epoch_dir + f"-{epoch}"))
+            self.save_checkpoint(os.path.join(self.output_dir,  f"checkpoint-{epoch}"))
 
     def setup(self, model: nn.Module):
         super().setup(model)
-        if self.enable_deepspeed:
-            self.model, self.optimizer, self.scheduler = self.init_deepspeed(self.model)
+        self.model, self.optimizer, self.scheduler = self.init_deepspeed(self.model)
 
     def init_deepspeed(
         self,
@@ -656,7 +680,7 @@ class DeepSpeedTrainer(TorchTrainer):
         return {
             "type": "Adam",
             "params": {
-            "lr": 0.001,
+            "lr": self.args.lr,
             "betas": [
                 0.8,
                 0.999
@@ -667,7 +691,6 @@ class DeepSpeedTrainer(TorchTrainer):
         }
 
     def setup_scheduler(self):
-
         return {
             "type": "WarmupLR",
             "params": {
