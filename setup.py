@@ -1,4 +1,4 @@
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import setuptools
 
@@ -26,5 +26,5 @@ setuptools.setup(
         "Operating System :: OS Independent",
         "Topic :: Scientific/Engineering :: Artificial Intelligence"
     ],
-    python_requires='>=3.7',
+    python_requires='>=3.6',
 )

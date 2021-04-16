@@ -1,23 +1,26 @@
 
 import os
+
 import torch
-from transformers import MBartForConditionalGeneration, MBartTokenizer
 from datasets import load_dataset
 
-import quick
-from dataclasses import dataclass
+BATCH_SIZE = os.environ.pop("BATCH_SIZE", 1)
+FILE_PATH = os.environ.pop("FILE_PATH", None)
+PRETRAINED_ID = os.environ.pop("PRETRAINED_ID", "facebook/mbart-large-cc25")
+ENABLE_DEEPSPEED = eval(os.environ.pop("ENABLE_DEEPSPEED", "False"))
+
+if ENABLE_DEEPSPEED:
+    from quick import DeepSpeedTrainer as TorchTrainer
+else:
+    from quick import TorchTrainer
 
 class DataLoader(object):
+    def __init__(self, tokenizer):
 
-    def __init__(self, tokenizer, args):
+        self.max_length = 512
+        self.max_target_length = 32
 
-        self.batch_size = args.batch_size
-        self.num_workers = args.num_workers
-
-        self.max_length = args.max_length
-        self.max_target_length = args.max_target_length
-
-        self.file_path = args.file_path
+        self.file_path = FILE_PATH
 
         self.tokenizer = tokenizer
         self.sep_token = self.tokenizer.convert_ids_to_tokens(self.tokenizer.sep_token_id)
@@ -29,7 +32,6 @@ class DataLoader(object):
         data = data.filter(lambda x: x["article_length"] > 32 and x["summary_length"] > 1)
 
         data = data.filter(lambda x: type(x["CleanedHeadline"]) == str and type(x["CleanedText"]) == str)
-        print("Dataset", data)
 
         data = data.train_test_split(test_size=600, shuffle=True, seed=42)
         tr_dataset = data["train"].map(lambda x: {"split": "TRAIN"})
@@ -42,9 +44,9 @@ class DataLoader(object):
             tr_dataset,
             pin_memory=True,
             shuffle=True,
-            batch_size=self.batch_size,
+            batch_size=BATCH_SIZE,
             collate_fn=self.collate_fn,
-            num_workers=self.num_workers
+            num_workers=2
         )
 
     def val_dataloader(self, val_dataset):
@@ -52,9 +54,9 @@ class DataLoader(object):
             val_dataset,
             pin_memory=True,
             shuffle=False,
-            batch_size=self.batch_size,
+            batch_size=BATCH_SIZE,
             collate_fn=self.collate_fn,
-            num_workers=self.num_workers
+            num_workers=2
         )
 
     def collate_fn(self, features):
@@ -68,72 +70,49 @@ class DataLoader(object):
         return features
 
 
-class Trainer(quick.TorchTrainer):
-
-    def __init__(self, model, args):
+class Trainer(TorchTrainer):
+    def __init__(self, args):
         super().__init__(args)
 
-        self.lr = args.lr
-        self.setup(model)
-
     def setup_optimizer(self):
-        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        if ENABLE_DEEPSPEED:
+            return super().setup_optimizer()
+        else:
+            return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+
+    def setup_scheduler(self):
+        if ENABLE_DEEPSPEED:
+            return super().setup_scheduler()
 
     def train_on_batch(self, batch, batch_idx):
-        for k in batch:
-            batch[k] = batch[k].to(self.device)
+        batch = {k: batch[k].to(self.device) for k in batch}
         out = self.model(**batch, return_dict=True)
-        loss = out["loss"].mean()
-        return loss
+        return out["loss"].mean()
 
     @torch.no_grad()
     def evaluate_on_batch(self, batch):
-        for k in batch:
-            batch[k] = batch[k].to(self.device)
+        batch = {k: batch[k].to(self.device) for k in batch}
         out = self.model(**batch, return_dict=True)
-        loss = out["loss"].mean()
-        return loss
+        return out["loss"].mean()
 
-    def training_epoch_end(self, epoch, tr_metric, val_metric):
-        # saving state_dict at epoch level
-        if self.args.weights_dir:
-            self.model.save_pretrained(os.path.join(self.args.base_dir, self.args.weights_dir+f"-e{epoch}"))
-
-@dataclass
-class TrainingArgs(quick.TorchTrainingArgs):
-
-    lr: float = 1.e-5
-    batch_size: int = 1
-    max_epochs: int = 10
-    accumulation_steps: int = 8
-
-    num_workers: int = 2
-    max_length: int = 512
-    max_target_length: int = 32
-    process_on_fly: bool = False
-    seed: int = 42
-    n_augment: int = 2
-
-    file_path: str = "examples/data/dev_data_article.csv"
-    pretrained_model_id: str = "facebook/mbart-large-cc25"
-    pretrained_tokenizer_id: str = "facebook/mbart-large-cc25"
-    weights_dir: str = "test-quick"
-
-    base_dir: str = "test-quick"
-    wandb_run_name: str = "test-quick"
-    project_name: str = "interiit-mbart"
 
 if __name__ == "__main__":
 
-    args = TrainingArgs()
-    model = MBartForConditionalGeneration.from_pretrained(args.pretrained_model_id)
-    tokenizer = MBartTokenizer.from_pretrained(args.pretrained_tokenizer_id)
-    dl = DataLoader(tokenizer, args)
+    from quick import TrainingArgs
+    from transformers import MBartForConditionalGeneration, MBartTokenizer
+    args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED)
+    print(args)
+
+    model = MBartForConditionalGeneration.from_pretrained(PRETRAINED_ID)
+    tokenizer = MBartTokenizer.from_pretrained(PRETRAINED_ID)
+
+    dl = DataLoader(tokenizer)
     tr_dataset, val_dataset = dl.setup()
     print(tr_dataset, val_dataset)
 
     tr_dataset = dl.train_dataloader(tr_dataset)
     val_dataset = dl.val_dataloader(val_dataset)
-    trainer = Trainer(model, args)
 
+    trainer = Trainer(args)
+    trainer.setup(model)
     trainer.fit(tr_dataset, val_dataset)

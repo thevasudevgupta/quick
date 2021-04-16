@@ -246,9 +246,9 @@ class TrainerSetup(object):
 
 class TorchTrainer(ABC, TrainerSetup):
 
-    @abstractmethod
     def setup_optimizer(self, **kwargs):
-        """This method must be implemented in the class inherited from this class"""
+        """This method can be implemented in the class inherited from this class"""
+        return torch.optim.Adam(self.model.parameters(), lr=self.args.lr)
 
     def setup_scheduler(self, **kwargs):
         """This method must be implemented in the class inherited from this class"""
@@ -451,7 +451,8 @@ class TorchTrainer(ABC, TrainerSetup):
         else:
             self.optimizer.step()
             self.empty_grad_()
-        self.scheduler.step() # TODO: check if its correct
+        if self.scheduler is not None:
+            self.scheduler.step() # TODO: check if its correct
 
     def backward(self, loss):
         loss.backward()
