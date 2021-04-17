@@ -6,7 +6,7 @@ from datasets import load_dataset
 
 ENABLE_DEEPSPEED = eval(os.environ.pop("ENABLE_DEEPSPEED", "False"))
 FILE_PATH = os.environ.pop("FILE_PATH", "examples/clean_article.csv")
-BATCH_SIZE = os.environ.pop("BATCH_SIZE", 1)
+BATCH_SIZE = eval(os.environ.pop("BATCH_SIZE", 1))
 PRETRAINED_ID = os.environ.pop("PRETRAINED_ID", "facebook/mbart-large-cc25")
 
 if ENABLE_DEEPSPEED:
