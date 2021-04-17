@@ -31,32 +31,28 @@ except:
 """
 USAGE:
 
-    >>> import quick
+    >>> import os
+    >>> ENABLE_DEEPSPEED = eval(os.environ.pop("ENABLE_DEEPSPEED", "False"))
 
-    >>> class Trainer(quick.TorchTrainer):
-            def __init__(self, args: TrainingArgs):
-                super().__init__(args)
+    >>> if ENABLE_DEEPSPEED:
+    ...     from quick import DeepSpeedTrainer as TorchTrainer
+    ... else:
+    ...     from quick import TorchTrainer
 
-            def setup_optimizer(self):
-                '''
-                    ....
-                '''
-                return
+    >>> class Trainer(TorchTrainer):
+    ...     def train_on_batch(self, batch, batch_idx):
+    ...         batch = {k: batch[k].to(self.device) for k in batch}
+    ...         out = self.model(**batch, return_dict=True)
+    ...         return out["loss"].mean()
 
-            def train_on_batch(self, batch, batch_idx):
-                '''
-                    ....
-                '''
-                return
+    ...     def evaluate_on_batch(self, batch):
+    ...         batch = {k: batch[k].to(self.device) for k in batch}
+    ...         out = self.model(**batch, return_dict=True)
+    ...         return out["loss"].mean()
 
-            def evaluate_on_batch(self, batch):
-                '''
-                    ....
-                '''
-                return
-
-    >>> args = quick.TrainingArgs()
-    >>> trainer = quick.TorchTrainer(args)
+    >>> from quick import TrainingArgs
+    >>> args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED)
+    >>> trainer = Trainer(args)
     >>> trainer.setup(model)
 
     >>> trainer.fit(tr_dataset, val_dataset)
@@ -99,7 +95,7 @@ class TrainingArgs:
     gradient_accumulation_steps: int = 1
     precision: str = "float32"
 
-    max_epochs: int = 5
+    max_epochs: int = 3
     output_dir: str = "Quick-project" # everything related to the experiment will be saved here
     save_strategy: str = "epoch" # None
 
@@ -140,7 +136,8 @@ class TrainingArgs:
         if self.enable_deepspeed:
             self.precision = None
             self.batch_size = None
-            # self.gradient_accumulation_steps = None
+            self.gradient_accumulation_steps = None
+            self.device = None
             assert DEEPSPEED_INSTALLATION_STATUS, "DeepSpeed not installed => Run `pip3 install deepspeed`"
 
     @staticmethod
@@ -246,19 +243,19 @@ class TrainerSetup(object):
 
 class TorchTrainer(ABC, TrainerSetup):
 
-    def setup_optimizer(self, **kwargs):
+    def setup_optimizer(self):
         """This method can be implemented in the class inherited from this class"""
         return torch.optim.Adam(self.model.parameters(), lr=self.args.lr)
 
-    def setup_scheduler(self, **kwargs):
+    def setup_scheduler(self):
+        """This method can be implemented in the class inherited from this class"""
+
+    @abstractmethod
+    def train_on_batch(self, *args, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
     @abstractmethod
-    def train_on_batch(self, **kwargs):
-        """This method must be implemented in the class inherited from this class"""
-
-    @abstractmethod
-    def evaluate_on_batch(self, **kwargs):
+    def evaluate_on_batch(self, *args, **kwargs):
         """This method must be implemented in the class inherited from this class"""
 
     def after_backward(self, batch_idx):
@@ -284,7 +281,6 @@ class TorchTrainer(ABC, TrainerSetup):
         self.precision = args.precision
         self.gradient_accumulation_steps = args.gradient_accumulation_steps
 
-        self.output_dir = args.output_dir
         self.save_strategy = args.save_strategy
 
         self.early_stop_n = args.early_stop_n
@@ -297,6 +293,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
     def setup(self, model: nn.Module):
         self.device = self.args.device
+
         self.model = model
         if torch.cuda.device_count() > 1:
             self.model = nn.DataParallel(self.model)
@@ -369,7 +366,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
             # setting up progress bar to display
             desc = f"running epoch-{epoch}"
-            pbar = tqdm(enumerate(tr_dataset), total=len(tr_dataset), desc=desc, initial=0, leave=False)
+            pbar = tqdm(enumerate(tr_dataset), total=len(tr_dataset), desc=desc, initial=0, leave=True)
             for batch_idx, batch in pbar:
                 # will help in resuming training from last-saved batch_idx
                 if batch_idx != self.start_batch_idx:
@@ -382,7 +379,9 @@ class TorchTrainer(ABC, TrainerSetup):
                 self.model.train(True)
                 # simply doing forward-propogation
                 loss = self.training_step(batch, batch_idx)
-                loss /= self.gradient_accumulation_steps
+
+                if self.gradient_accumulation_steps is not None:
+                    loss /= self.gradient_accumulation_steps
 
                 # accumulating tr_loss for logging (helpful when accumulation-steps > 1)
                 tr_loss += loss.item() # this should be loss.detach() if using TPUs
@@ -530,7 +529,7 @@ class TorchTrainer(ABC, TrainerSetup):
         self.save_optimizer_state_dict(ckpt_dir)
         self.save_scheduler_state_dict(ckpt_dir)
 
-    def load_model_state_dict(self, load_dir: str, map_location: str):
+    def load_model_state_dict(self, load_dir: str, map_location: str = "cpu"):
         """ `map_function` will be very memory expensive if you are changing the device """
         path = os.path.join(load_dir, "pytorch_model.bin")
         model = torch.load(path, map_location=map_location)
@@ -622,7 +621,7 @@ class DeepSpeedTrainer(TorchTrainer):
             "type": "WarmupLR",
             "params": {
                 "warmup_min_lr": 1.e-5,
-                "warmup_max_lr": 7.e-5,
+                "warmup_max_lr": self.args.lr,
                 "warmup_num_steps": 1000
             }
         }

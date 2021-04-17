@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 data/
+Quick-project/
 *.DS_Store
 *.py[cod]
 *$py.class
