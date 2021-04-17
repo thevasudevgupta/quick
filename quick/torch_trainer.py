@@ -66,6 +66,9 @@ class DeepSpeedPlugin:
     train_batch_size: int = None
     gradient_accumulation_steps: int = None
 
+    steps_per_print: int = 10000
+    wall_clock_breakdown: bool = False
+
     fp16: tuple = (
         ("enabled", True),
     )
