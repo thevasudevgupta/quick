@@ -140,7 +140,7 @@ class TrainingArgs:
         if self.enable_deepspeed:
             self.precision = None
             self.batch_size = None
-            self.gradient_accumulation_steps = None
+            # self.gradient_accumulation_steps = None
             assert DEEPSPEED_INSTALLATION_STATUS, "DeepSpeed not installed => Run `pip3 install deepspeed`"
 
     @staticmethod
@@ -279,8 +279,6 @@ class TorchTrainer(ABC, TrainerSetup):
         super().__init__()
 
         self.output_dir = args.output_dir
-
-        self.map_location = args.map_location
         self.max_epochs = args.max_epochs
 
         self.precision = args.precision
@@ -393,11 +391,11 @@ class TorchTrainer(ABC, TrainerSetup):
                 if self.scaler is not None:
                     loss = self.scaler.scale(loss)
 
-                loss.backward()
+                self.backward(loss)
                 self.after_backward(batch_idx)
 
                 # gradient accumulation handler
-                if self.is_gradient_accumulation_boundary(batch_idx) == 0:
+                if self.is_gradient_accumulation_boundary(batch_idx):
                     self.optimizer_step(batch_idx, epoch)
 
                     self.logger.log({
@@ -441,7 +439,7 @@ class TorchTrainer(ABC, TrainerSetup):
         return tr_metric, val_metric
 
     def is_gradient_accumulation_boundary(self, batch_idx):
-        return (batch_idx+1)%self.gradient_accumulation_steps
+        return (batch_idx+1)%self.gradient_accumulation_steps == 0
 
     def optimizer_step(self, batch_idx, epoch):
         # configuring for mixed-precision

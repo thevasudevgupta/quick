@@ -4,10 +4,10 @@ import os
 import torch
 from datasets import load_dataset
 
-BATCH_SIZE = os.environ.pop("BATCH_SIZE", 1)
-FILE_PATH = os.environ.pop("FILE_PATH", None)
-PRETRAINED_ID = os.environ.pop("PRETRAINED_ID", "facebook/mbart-large-cc25")
 ENABLE_DEEPSPEED = eval(os.environ.pop("ENABLE_DEEPSPEED", "False"))
+FILE_PATH = os.environ.pop("FILE_PATH", "examples/clean_article.csv")
+BATCH_SIZE = os.environ.pop("BATCH_SIZE", 1)
+PRETRAINED_ID = os.environ.pop("PRETRAINED_ID", "facebook/mbart-large-cc25")
 
 if ENABLE_DEEPSPEED:
     from quick import DeepSpeedTrainer as TorchTrainer
@@ -17,7 +17,7 @@ else:
 class DataLoader(object):
     def __init__(self, tokenizer):
 
-        self.max_length = 512
+        self.max_length = 256
         self.max_target_length = 32
 
         self.file_path = FILE_PATH
@@ -28,16 +28,12 @@ class DataLoader(object):
     def setup(self):
 
         data = load_dataset("csv", data_files=self.file_path)["train"]
-        data = data.map(lambda x: {"CleanedHeadline": x["Headline"]})
-        data = data.filter(lambda x: x["article_length"] > 32 and x["summary_length"] > 1)
-
-        data = data.filter(lambda x: type(x["CleanedHeadline"]) == str and type(x["CleanedText"]) == str)
+        data = data.filter(lambda x: len(x["Text"]) > 32*4 and len(x["Headline"]) > 1*4)
+        data = data.filter(lambda x: type(x["Headline"]) == str and type(x["Text"]) == str)
+        print(data)
 
         data = data.train_test_split(test_size=600, shuffle=True, seed=42)
-        tr_dataset = data["train"].map(lambda x: {"split": "TRAIN"})
-        val_dataset = data["test"].map(lambda x: {"split": "VALIDATION"})
-
-        return tr_dataset, val_dataset
+        return data["train"], data["test"]
 
     def train_dataloader(self, tr_dataset):
         return torch.utils.data.DataLoader(
@@ -60,8 +56,8 @@ class DataLoader(object):
         )
 
     def collate_fn(self, features):
-        article = [f["CleanedText"] for f in features]
-        summary = [f["CleanedHeadline"] for f in features]
+        article = [f["Text"] for f in features]
+        summary = [f["Headline"] for f in features]
         # src_lang will be dummy
         features = self.tokenizer.prepare_seq2seq_batch(
             src_texts=article, src_lang="hi_IN", tgt_lang="en_XX", tgt_texts=summary, truncation=True, 
@@ -78,7 +74,7 @@ class Trainer(TorchTrainer):
         if ENABLE_DEEPSPEED:
             return super().setup_optimizer()
         else:
-            return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+            return torch.optim.Adam(self.model.parameters(), lr=self.args.lr)
 
     def setup_scheduler(self):
         if ENABLE_DEEPSPEED:
@@ -100,7 +96,7 @@ if __name__ == "__main__":
 
     from quick import TrainingArgs
     from transformers import MBartForConditionalGeneration, MBartTokenizer
-    args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED)
+    args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED, batch_size=BATCH_SIZE)
     print(args)
 
     model = MBartForConditionalGeneration.from_pretrained(PRETRAINED_ID)
