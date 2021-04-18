@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 try:
     import deepspeed
     DEEPSPEED_INSTALLATION_STATUS = True
-except:
+except ImportError:
     logger.warning("DeepSpeed is not available => run `pip3 install deepspeed` if you want to use DeepSpeed")
     DEEPSPEED_INSTALLATION_STATUS = False
 
@@ -45,6 +45,7 @@ USAGE:
     ...         out = self.model(**batch, return_dict=True)
     ...         return out["loss"].mean()
 
+    ...     @torch.no_grad()
     ...     def evaluate_on_batch(self, batch):
     ...         batch = {k: batch[k].to(self.device) for k in batch}
     ...         out = self.model(**batch, return_dict=True)
@@ -91,7 +92,6 @@ class DeepSpeedPlugin:
 @dataclass
 class TrainingArgs:
 
-    # unused
     batch_size: int = 8
     lr: float = 5e-5
 
@@ -113,6 +113,11 @@ class TrainingArgs:
     deepspeed_plugin: DeepSpeedPlugin = DeepSpeedPlugin()
 
     def __post_init__(self):
+
+        assert self.save_strategy in [None, "epoch"], f"save_strategy can either be None / epoch; but you specified {self.save_strategy}"
+        assert isinstance(self.deepspeed_plugin, DeepSpeedPlugin), "deepspeed_plugin must be instance of DeepSpeedPlugin"
+        assert self.precision in ['float32', 'mixed16'], f"precision can either be float32 / mixed16; but you specified {self.precision}"
+
         if not torch.cuda.is_available():
             logger.warning("[Quick WARNING] CUDA is not available => Training will happen on CPU")
 
@@ -121,12 +126,12 @@ class TrainingArgs:
         if self.precision == "mixed16":
             if not torch.cuda.is_available():
                 raise ValueError('CUDA is not available')
-            raise NotImplementedError
+            raise NotImplementedError # TODO: need to fix some bugs
 
         if self.save_strategy is None:
             logger.warning("[Quick WARNING] You are not saving anything")
 
-        # this will be overwritten in DeepSpeedTrainer.setup()
+        # this will be overwritten in DeepSpeedTrainer.setup() / TorchTrainer.setup()
         self.device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 
         # setting up deepspeed plugin
@@ -152,7 +157,6 @@ class TrainingArgs:
 
 
 class TrainerSetup(object):
-
     @staticmethod
     def assert_epoch_saving(val_metric: list, n: int = 3, mode: str = "min"):
         """
@@ -245,7 +249,6 @@ class TrainerSetup(object):
 
 
 class TorchTrainer(ABC, TrainerSetup):
-
     def setup_optimizer(self):
         """This method can be implemented in the class inherited from this class"""
         return torch.optim.Adam(self.model.parameters(), lr=self.args.lr)
@@ -300,8 +303,7 @@ class TorchTrainer(ABC, TrainerSetup):
         self.model = model
         if torch.cuda.device_count() > 1:
             self.model = nn.DataParallel(self.model)
-        else:
-            self.model.to(self.device)
+        self.model.to(self.device)
 
         self.optimizer = self.setup_optimizer()
         self.scheduler = self.setup_scheduler()
@@ -543,9 +545,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
 
 class DeepSpeedTrainer(TorchTrainer):
-
     def setup(self, model: nn.Module):
-
         self.optimizer = self.setup_optimizer()
         self.scheduler = self.setup_scheduler()
         self.scaler = None
