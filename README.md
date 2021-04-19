@@ -46,7 +46,7 @@ pip3 install git+https://github.com/vasudevgupta7/quick@main
 ENABLE_DEEPSPEED=False python3 train.py
 
 # with deepspeed
-ENABLE_DEEPSPEED=True deepspeed --num_gpus 2 train.py
+ENABLE_DEEPSPEED=True deepspeed train.py
 ```
 
 **How can I change TrainingArgs & DeepSpeed config**
@@ -55,7 +55,7 @@ ENABLE_DEEPSPEED=True deepspeed --num_gpus 2 train.py
 >>> from quick import TrainingArgs, DeepSpeedPlugin
 
 >>> args = TrainingArgs(
-...     batch_size=8,
+...     batch_size_per_device=8,
 ...     lr=5e-5,
 ...     gradient_accumulation_steps=1,
 ...     max_epochs=3,
@@ -65,7 +65,7 @@ ENABLE_DEEPSPEED=True deepspeed --num_gpus 2 train.py
 ...     wandb_run_name=None,
 ...     # deepspeed args
 ...     enable_deepspeed=False,
-...     deepspeed_plugin=DeepSpeedPlugin(enable_deepspeed=True, fp16=(("enabled", False))),
+...     deepspeed_plugin=DeepSpeedPlugin(zero_optimization={"stage": 0}),
 ...     )
 ```
 

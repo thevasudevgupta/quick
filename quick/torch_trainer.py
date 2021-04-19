@@ -1,9 +1,6 @@
 # __author__ = 'Vasudev Gupta'
 # __author_email__ = '7vasudevgupta@gmail.com'
 
-# TODO:
-# gradient accumulation deepspeed
-# 
 
 import numpy as np
 import torch
@@ -12,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 
 import wandb
 import logging
@@ -23,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 try:
     import deepspeed
-    DEEPSPEED_INSTALLATION_STATUS = True
+    IS_DEEPSPEED_AVAILABLE = True
 except ImportError:
     logger.warning("DeepSpeed is not available => run `pip3 install deepspeed` if you want to use DeepSpeed")
-    DEEPSPEED_INSTALLATION_STATUS = False
+    IS_DEEPSPEED_AVAILABLE = False
 
 """
 USAGE:
@@ -51,8 +48,9 @@ USAGE:
     ...         out = self.model(**batch, return_dict=True)
     ...         return out["loss"].mean()
 
-    >>> from quick import TrainingArgs
-    >>> args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED)
+    >>> from quick import TrainingArgs, DeepSpeedPlugin
+    >>> deepspeed_plugin = DeepSpeedPlugin(zero_optimization={"stage": 0})
+    >>> args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED, deepspeed_plugin=deepspeed_plugin)
     >>> trainer = Trainer(args)
     >>> trainer.setup(model)
 
@@ -61,6 +59,7 @@ USAGE:
 
 @dataclass
 class DeepSpeedPlugin:
+    # following arguments will hold only if `enable_deepspeed=True`
     # this will take all value you would have specified in `ds_config.json`
 
     local_rank: int  = 0
@@ -70,29 +69,14 @@ class DeepSpeedPlugin:
     steps_per_print: int = 10000
     wall_clock_breakdown: bool = False
 
-    fp16: tuple = (
-        ("enabled", True),
-    )
-
-    zero_optimization: tuple = (
-        ("stage", 2),
-        ("cpu_offload", False),
-    )
-
-    def __post_init__(self):
-        for attr_name in ["fp16", "zero_optimization"]:
-            if isinstance(getattr(self, attr_name), tuple):
-                temp = {}
-                for k, v in getattr(self, attr_name):
-                    temp[k] = v
-                setattr(self, attr_name, temp)
-            assert isinstance(getattr(self, attr_name), dict), f"{attr_name} must be dict"
+    fp16: dict = field(default_factory=lambda: {"enabled": True})
+    zero_optimization: dict = field(default_factory=lambda: {"stage": 2, "cpu_offload": False})
 
 
 @dataclass
 class TrainingArgs:
 
-    batch_size: int = 8
+    batch_size_per_device: int = 8
     lr: float = 5e-5
 
     gradient_accumulation_steps: int = 1
@@ -117,6 +101,9 @@ class TrainingArgs:
         assert self.save_strategy in [None, "epoch"], f"save_strategy can either be None / epoch; but you specified {self.save_strategy}"
         assert isinstance(self.deepspeed_plugin, DeepSpeedPlugin), "deepspeed_plugin must be instance of DeepSpeedPlugin"
         assert self.precision in ['float32', 'mixed16'], f"precision can either be float32 / mixed16; but you specified {self.precision}"
+        if self.enable_deepspeed:
+            assert torch.cuda.is_available(), "GPU is not available => Can't enable DeepSpeed"
+            assert IS_DEEPSPEED_AVAILABLE, "DeepSpeed not installed => Run `pip3 install deepspeed`"
 
         if not torch.cuda.is_available():
             logger.warning("[Quick WARNING] CUDA is not available => Training will happen on CPU")
@@ -134,19 +121,19 @@ class TrainingArgs:
         # this will be overwritten in DeepSpeedTrainer.setup() / TorchTrainer.setup()
         self.device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 
-        # setting up deepspeed plugin
-        self.deepspeed_plugin = replace(
-            self.deepspeed_plugin,
-            train_batch_size=self.batch_size * self.gradient_accumulation_steps,
-            gradient_accumulation_steps=self.gradient_accumulation_steps
-        )
-
         if self.enable_deepspeed:
+            num_gpus = torch.cuda.device_count()
+            # setting up deepspeed plugin
+            self.deepspeed_plugin = replace(
+                self.deepspeed_plugin,
+                train_batch_size=self.batch_size_per_device * self.gradient_accumulation_steps * num_gpus,
+                gradient_accumulation_steps=self.gradient_accumulation_steps
+            )
+
             self.precision = None
-            self.batch_size = None
+            self.batch_size_per_device = None
             self.gradient_accumulation_steps = None
             self.device = None
-            assert DEEPSPEED_INSTALLATION_STATUS, "DeepSpeed not installed => Run `pip3 install deepspeed`"
 
     @staticmethod
     def _setup_dir(output_dir: str):
