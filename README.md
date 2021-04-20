@@ -10,7 +10,7 @@ pip3 install torch==1.7.1+cu110 torchvision==0.8.2+cu110 torchaudio==0.7.2 -f ht
 pip3 install git+https://github.com/vasudevgupta7/quick@main
 ```
 
-**How to use?**
+**How to use ?**
 
 ```python
 >>> import os
@@ -49,7 +49,7 @@ ENABLE_DEEPSPEED=False python3 train.py
 ENABLE_DEEPSPEED=True deepspeed train.py
 ```
 
-**How can I change TrainingArgs & DeepSpeed config**
+**How can I change TrainingArgs & DeepSpeed config ?**
 
 ```python
 >>> from quick import TrainingArgs, DeepSpeedPlugin
@@ -67,6 +67,13 @@ ENABLE_DEEPSPEED=True deepspeed train.py
 ...     enable_deepspeed=False,
 ...     deepspeed_plugin=DeepSpeedPlugin(zero_optimization={"stage": 0}),
 ...     )
+```
+
+**How to get dataset for running examples**
+
+```shell
+# run this from examples directory
+git clone https://huggingface.co/datasets/vasudevgupta/data
 ```
 
 **End Notes**
