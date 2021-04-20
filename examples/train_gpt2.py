@@ -1,5 +1,5 @@
-# ENABLE_DEEPSPEED=False BATCH_SIZE=8 GRAD_ACC_STEPS=4 DATA_FILE_NAME="data/train.csv" python3 train_gpt.py
-# ENABLE_DEEPSPEED=True BATCH_SIZE=16 GRAD_ACC_STEPS=2 DATA_FILE_NAME="data/train.csv" deepspeed train_gpt.py
+# ENABLE_DEEPSPEED=False BATCH_SIZE=8 GRAD_ACC_STEPS=4 DATA_FILE_NAME="data/train.csv" python3 train_gpt2.py
+# ENABLE_DEEPSPEED=True BATCH_SIZE=16 GRAD_ACC_STEPS=2 DATA_FILE_NAME="data/train.csv" deepspeed train_gpt2.py
 
 import os
 from quick.torch_trainer import DeepSpeedPlugin
@@ -39,7 +39,7 @@ class Trainer(TorchTrainer):
     def train_on_batch(self, batch, batch_idx):
         batch = {k: batch[k].to(self.device) for k in batch}
         return self.model(**batch)["loss"]
-    
+
     @torch.no_grad()
     def evaluate_on_batch(self, batch):
         batch = {k: batch[k].to(self.device) for k in batch}
@@ -78,3 +78,6 @@ if __name__ == '__main__':
     # training model
     trainer.setup(model)
     trainer.fit(tr_data, val_data)
+
+    # saving huggingface final model
+    trainer.model.save_pretrained(os.path.join(args.output_dir, "final-weights"))
