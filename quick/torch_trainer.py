@@ -516,6 +516,7 @@ class TorchTrainer(ABC, TrainerSetup):
         torch.save(model.state_dict(), path)
 
     def save_checkpoint(self, ckpt_dir: str):
+        ckpt_dir = self.args._setup_dir(ckpt_dir)
         self.save_model_state_dict(ckpt_dir)
         self.save_training_state(ckpt_dir)
         self.save_optimizer_state_dict(ckpt_dir)

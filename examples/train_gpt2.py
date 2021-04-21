@@ -8,6 +8,7 @@ import torch
 ENABLE_DEEPSPEED = eval(os.environ.pop("ENABLE_DEEPSPEED", "False"))
 BATCH_SIZE = eval(os.environ.pop("BATCH_SIZE", "8"))
 GRAD_ACC_STEPS = eval(os.environ.pop("GRAD_ACC_STEPS", "4"))
+
 MAX_LENGTH = eval(os.environ.pop("MAX_LENGTH", "512"))
 DATA_FILE_NAME = os.environ.pop("DATA_FILE_NAME", "data/train.csv")
 MODEL_ID = os.environ.pop("MODEL_ID", "distilgpt2")
@@ -45,6 +46,8 @@ class Trainer(TorchTrainer):
         batch = {k: batch[k].to(self.device) for k in batch}
         return self.model(**batch)["loss"]
 
+    def training_epoch_end(self, epoch, tr_metric, val_metric):
+        self.model.save_pretrained(os.path.join(self.output_dir, f"checkpoint-e{epoch}"))
 
 if __name__ == '__main__':
     from transformers import GPT2Tokenizer, GPT2LMHeadModel
@@ -65,8 +68,9 @@ if __name__ == '__main__':
     val_data = get_dataloader(val_data, tokenizer=tokenizer)
 
     # setting trainer
-    deepspeed_plugin = DeepSpeedPlugin(fp16={"enabled": True}, zero_optimization={"stage": 2, "cpu_offload": True})
+    deepspeed_plugin = DeepSpeedPlugin(fp16={"enabled": True}, zero_optimization={"stage": 0, "cpu_offload": True})
     args = TrainingArgs(
+        output_dir="/workspace/data/distilgpt2",
         enable_deepspeed=ENABLE_DEEPSPEED,
         deepspeed_plugin=deepspeed_plugin,
         lr=5.e-5,
