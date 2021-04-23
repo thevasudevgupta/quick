@@ -9,9 +9,9 @@ ENABLE_DEEPSPEED = eval(os.environ.pop("ENABLE_DEEPSPEED", "False"))
 BATCH_SIZE = eval(os.environ.pop("BATCH_SIZE", "8"))
 GRAD_ACC_STEPS = eval(os.environ.pop("GRAD_ACC_STEPS", "4"))
 
-MAX_LENGTH = eval(os.environ.pop("MAX_LENGTH", "512"))
+MAX_LENGTH = eval(os.environ.pop("MAX_LENGTH", "320"))
 DATA_FILE_NAME = os.environ.pop("DATA_FILE_NAME", "data/train.csv")
-MODEL_ID = os.environ.pop("MODEL_ID", "distilgpt2")
+MODEL_ID = os.environ.pop("MODEL_ID", "gpt2-large")
 TEST_SIZE = eval(os.environ.pop("TEST_SIZE", "0.06"))
 
 if ENABLE_DEEPSPEED:
@@ -61,6 +61,7 @@ if __name__ == '__main__':
 
     # setting data
     dataset = load_dataset("csv", data_files=DATA_FILE_NAME)['train']
+#     dataset = dataset.select(range(40))
     data = dataset.train_test_split(test_size=TEST_SIZE, seed=42, shuffle=True)
     tr_data, val_data = data['train'], data['test']
     print(tr_data, val_data)
@@ -70,12 +71,13 @@ if __name__ == '__main__':
     # setting trainer
     deepspeed_plugin = DeepSpeedPlugin(fp16={"enabled": True}, zero_optimization={"stage": 0, "cpu_offload": True})
     args = TrainingArgs(
-        output_dir="/workspace/data/distilgpt2",
+        output_dir="/workspace/data/gpt2",
         enable_deepspeed=ENABLE_DEEPSPEED,
         deepspeed_plugin=deepspeed_plugin,
-        lr=5.e-5,
+        lr=7.e-5,
         batch_size_per_device=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACC_STEPS,
+        max_epochs=5,
     )
     trainer = Trainer(args)
 
