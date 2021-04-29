@@ -34,20 +34,29 @@ else:
 def collate_fn(features):
     title = [f['title'] for f in features]
     abstract = [f['abstract'] for f in features]
-    batch = tokenizer(title, abstract, return_tensors="pt", max_length=MAX_LENGTH, truncation=True, padding=True)
-    labels = batch['input_ids'].clone()
+
+    inputs = tokenizer(title, return_tensors="pt", max_length=32, truncation=True, padding=True, add_special_tokens=False)
+    outputs = tokenizer(abstract, return_tensors="pt", max_length=MAX_LENGTH, truncation=True, padding=True)
+    labels = outputs['input_ids']
+#     print(tokenizer.convert_ids_to_tokens(inputs['input_ids'][0]))
+#     print(tokenizer.convert_ids_to_tokens(labels[0]))
     labels[labels == tokenizer.pad_token_id] = -100
+#     print(labels[0])
     # -100 will be replaced by `pad_token_id` inside for `decoder_input_ids`
     return {
-        "input_ids": batch["input_ids"],
-        "attention_mask": batch["attention_mask"],
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
         "labels": labels,
+        "decoder_attention_mask": outputs['attention_mask'],
     }
 
 
 class Trainer(TorchTrainer):
     def setup_optimizer(self):
         return Adafactor(self.model.parameters())
+
+#     def setup_scheduler(self):
+#         return get_linear_schedule_with_warmup(self.optimizer, 500, 150000)
 
     def train_on_batch(self, batch, batch_idx):
         batch = {k: batch[k].to(self.device) for k in batch}
@@ -79,10 +88,12 @@ if __name__ == '__main__':
     # setting trainer
     deepspeed_plugin = DeepSpeedPlugin(fp16={"enabled": False}, zero_optimization={"stage": 0})
     args = TrainingArgs(
+        output_dir="/workspace/data/pegasus",
         enable_deepspeed=ENABLE_DEEPSPEED,
         deepspeed_plugin=deepspeed_plugin,
         batch_size_per_device=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACC_STEPS,
+        max_epochs=3,
     )
 
     trainer = Trainer(args)
