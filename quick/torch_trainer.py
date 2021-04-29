@@ -307,7 +307,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
     def training_step(self, batch, batch_idx):
         if self.scaler is not None:
-            return torch.cuda.amp.autocast(self.train_on_batch)(batch, batch_idx)
+            return torch.cuda.amp.autocast()(self.train_on_batch(batch, batch_idx))
         return self.train_on_batch(batch, batch_idx)
 
     def validation_step(self, batch):
@@ -546,30 +546,38 @@ class DeepSpeedTrainer(TorchTrainer):
         }
         self.logger = self.setup_wandb(wandb_args)
 
-        self.model, self.optimizer, self.scheduler = self.init_deepspeed(model)
+        self._init_deepspeed(model)
         self.device = self.args.device = model.device
 
-    def init_deepspeed(
+    def _init_deepspeed(
         self,
         model: nn.Module,
     ):
         ds_config = {}
-        if isinstance(self.optimizer, dict):
-            ds_config.update({"optimizer": self.optimizer})
-        else:
-            raise NotImplementedError
-        if isinstance(self.scheduler, dict):
-            ds_config.update({"scheduler": self.scheduler})
+        if isinstance(self.optimizer, dict) and isinstance(self.scheduler, dict):
+            ds_config.update({
+                "optimizer": self.optimizer,
+                "scheduler": self.scheduler
+            })
+            optimizer = None
+            scheduler = None
+        elif isinstance(self.optimizer, torch.optim):
+            optimizer = self.optimizer
+            scheduler = self.scheduler
         else:
             raise NotImplementedError
         ds_config.update(self.args.deepspeed_plugin.__dict__)
 
         model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-        model, optimizer, _, scheduler = deepspeed.initialize(
+        model, optimizer, tr_dataloader, scheduler = deepspeed.initialize(
             model=model, model_parameters=model_parameters, config_params=ds_config,
+            optimizer=optimizer, lr_scheduler=scheduler, training_data=None,
         )
 
-        return model, optimizer, scheduler
+        self.model = model
+        self.optimizer = optimizer
+        # self.tr_dataloader = tr_dataloader
+        self.scheduler = scheduler
 
     def is_gradient_accumulation_boundary(self, batch_idx):
         return self.model.is_gradient_accumulation_boundary()
