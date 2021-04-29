@@ -79,4 +79,5 @@ git clone https://huggingface.co/datasets/vasudevgupta/data
 **End Notes**
 
 - Currently, this can't be used with models involving multiple optimizers (like GANs).
+- All the features are not tested yet. In progress ....
 - Don't forget to send your batch to `self.device`, model will be automatically transferred (you need not worry about that).

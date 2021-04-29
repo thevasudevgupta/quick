@@ -77,6 +77,7 @@ class DeepSpeedPlugin:
 class TrainingArgs:
 
     batch_size_per_device: int = 8
+    num_workers: int = 2
     lr: float = 5e-5
 
     gradient_accumulation_steps: int = 1
@@ -120,13 +121,16 @@ class TrainingArgs:
 
         # this will be overwritten in DeepSpeedTrainer.setup() / TorchTrainer.setup()
         self.device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
+        num_gpus = torch.cuda.device_count()
+
+        train_batch_size = self.batch_size_per_device * self.gradient_accumulation_steps * num_gpus
+        self.train_batch_size = train_batch_size
 
         if self.enable_deepspeed:
-            num_gpus = torch.cuda.device_count()
             # setting up deepspeed plugin
             self.deepspeed_plugin = replace(
                 self.deepspeed_plugin,
-                train_batch_size=self.batch_size_per_device * self.gradient_accumulation_steps * num_gpus,
+                train_batch_size=train_batch_size,
                 gradient_accumulation_steps=self.gradient_accumulation_steps
             )
 
@@ -274,6 +278,9 @@ class TorchTrainer(ABC, TrainerSetup):
         self.precision = args.precision
         self.gradient_accumulation_steps = args.gradient_accumulation_steps
 
+        self.train_batch_size = args.train_batch_size
+        self.num_workers = args.num_workers
+
         self.save_strategy = args.save_strategy
 
         self.early_stop_n = args.early_stop_n
@@ -284,7 +291,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
         self.args = args
 
-    def setup(self, model: nn.Module):
+    def setup(self, model: nn.Module, tr_dataset: torch.utils.data.Dataset, val_dataset: torch.utils.data.Dataset, collate_fn=None):
         self.device = self.args.device
 
         self.model = model
@@ -305,6 +312,9 @@ class TorchTrainer(ABC, TrainerSetup):
         }
         self.logger = self.setup_wandb(wandb_args)
 
+        self.tr_dataloader = self.get_dataloader(tr_dataset, collate_fn=collate_fn, is_train=True)
+        self.val_dataloader = self.get_dataloader(val_dataset, collate_fn=collate_fn, is_train=False)
+
     def training_step(self, batch, batch_idx):
         if self.scaler is not None:
             return torch.cuda.amp.autocast()(self.train_on_batch(batch, batch_idx))
@@ -313,20 +323,29 @@ class TorchTrainer(ABC, TrainerSetup):
     def validation_step(self, batch):
         return self.evaluate_on_batch(batch)
 
+    def get_dataloader(self, dataset, collate_fn=None, is_train=True):
+        return torch.utils.data.DataLoader(
+            dataset, batch_size=self.train_batch_size, collate_fn=collate_fn, shuffle=is_train, pin_memory=True, num_workers=self.num_workers
+        )
+
     def fit(
         self,
-        tr_dataset: torch.utils.data.DataLoader,
-        val_dataset: torch.utils.data.DataLoader,
-        checkpoint_dir: str = None,
+        model,
+        tr_dataset: torch.utils.data.Dataset,
+        val_dataset: torch.utils.data.Dataset,
+        collate_fn=None,
+        resume_from_checkpoint: str = None,
         map_location: str = "cuda:0",
     ):
 
-        if checkpoint_dir is not None:
-            print(f"Resuming from checkpoint- {checkpoint_dir}")
-            self.load_checkpoint(checkpoint_dir)
+        self.setup(model, tr_dataset, val_dataset, collate_fn=collate_fn)
+
+        if resume_from_checkpoint is not None:
+            print(f"Resuming from checkpoint- {resume_from_checkpoint}")
+            self.load_checkpoint(resume_from_checkpoint)
 
         try:
-            tr_metric, val_metric = self.train(tr_dataset, val_dataset)
+            tr_metric, val_metric = self.train()
             self.display_metrics(self.max_epochs, tr_metric, val_metric)
         except KeyboardInterrupt:
             logger.warning('Interrupting through keyboard ======= Saving model weights')
@@ -338,7 +357,7 @@ class TorchTrainer(ABC, TrainerSetup):
         for param in self.model.parameters():
             param.grad = None
 
-    def train(self, tr_dataset, val_dataset):
+    def train(self):
 
         tr_metric = []
         val_metric = []
@@ -358,7 +377,7 @@ class TorchTrainer(ABC, TrainerSetup):
 
             # setting up progress bar to display
             desc = f"running epoch-{epoch}"
-            pbar = tqdm(enumerate(tr_dataset), total=len(tr_dataset), desc=desc, initial=0, leave=True)
+            pbar = tqdm(enumerate(self.tr_dataloader), total=len(self.tr_dataloader), desc=desc, initial=0, leave=True)
             for batch_idx, batch in pbar:
                 # will help in resuming training from last-saved batch_idx
                 if batch_idx != self.start_batch_idx:
@@ -409,7 +428,7 @@ class TorchTrainer(ABC, TrainerSetup):
             self.start_batch_idx = 0
 
             # val_loss at training epoch end for logging
-            val_loss = self.evaluate(val_dataset, show_progress=True)
+            val_loss = self.evaluate(show_progress=True)
 
             self.logger.log({
                 'epoch': epoch,
@@ -446,13 +465,13 @@ class TorchTrainer(ABC, TrainerSetup):
     def backward(self, loss):
         loss.backward()
 
-    def evaluate(self, val_dataset, show_progress=True):
+    def evaluate(self, show_progress=True):
         # disabling layers like dropout, batch-normalization
         self.model.eval()
         running_loss = []
 
         desc = 'Validating ....'
-        pbar = tqdm(val_dataset, total=len(val_dataset), desc=desc, initial=0, leave=False) if show_progress else val_dataset
+        pbar = tqdm(self.val_dataloader, total=len(self.val_dataloader), desc=desc, initial=0, leave=False) if show_progress else self.val_dataloader
         for batch in pbar:
             val_loss = self.validation_step(batch)
             pbar.set_postfix(val_loss=val_loss.item())
@@ -532,8 +551,17 @@ class TorchTrainer(ABC, TrainerSetup):
         raise NotImplementedError
 
 
+class CONVERT_HF_DATA_TO_TORCH_DATA(torch.utils.data.Dataset):
+    def __init__(self, hf_data):
+        self.hf_data = hf_data
+    def __len__(self):
+        return len(self.hf_data)
+    def __getitem__(self, idx):
+        return self.hf_data[idx]
+
 class DeepSpeedTrainer(TorchTrainer):
-    def setup(self, model: nn.Module):
+    def setup(self, model: nn.Module, tr_dataset: torch.utils.data.Dataset, val_dataset: torch.utils.data.Dataset, collate_fn=None):
+        self.model = model
         self.optimizer = self.setup_optimizer()
         self.scheduler = self.setup_scheduler()
         self.scaler = None
@@ -546,40 +574,42 @@ class DeepSpeedTrainer(TorchTrainer):
         }
         self.logger = self.setup_wandb(wandb_args)
 
-        self._init_deepspeed(model)
-        self.device = self.args.device = model.device
+        self._init_deepspeed(tr_dataset, collate_fn=collate_fn)
+        self.val_dataloader = self.get_dataloader(val_dataset)
+        self.device = self.args.device = self.model.device
 
     def _init_deepspeed(
         self,
-        model: nn.Module,
+        tr_dataset: torch.utils.data.Dataset,
+        collate_fn=None,
     ):
         ds_config = {}
-        if isinstance(self.optimizer, dict) and isinstance(self.scheduler, dict):
-            ds_config.update({
-                "optimizer": self.optimizer,
-                "scheduler": self.scheduler
-            })
+        if isinstance(self.optimizer, dict):
+            ds_config.update({"optimizer": self.optimizer})
             optimizer = None
-            scheduler = None
-        elif isinstance(self.optimizer, torch.optim):
-            optimizer = self.optimizer
-            scheduler = self.scheduler
         else:
-            raise NotImplementedError
+            optimizer = self.optimizer
+
+        if isinstance(self.scheduler, dict):
+            ds_config.update({"scheduler": self.scheduler})
+            scheduler = None
+        else:
+            scheduler = self.scheduler
+
         ds_config.update(self.args.deepspeed_plugin.__dict__)
 
-        model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-        model, optimizer, tr_dataloader, scheduler = deepspeed.initialize(
-            model=model, model_parameters=model_parameters, config_params=ds_config,
-            optimizer=optimizer, lr_scheduler=scheduler, training_data=None,
+        model_parameters = filter(lambda p: p.requires_grad, self.model.parameters())
+        self.model, optimizer, tr_dataloader, scheduler = deepspeed.initialize(
+            model=self.model, model_parameters=model_parameters, config_params=ds_config,
+            optimizer=optimizer, lr_scheduler=scheduler, training_data=tr_dataset, collate_fn=collate_fn,
         )
 
-        self.model = model
         self.optimizer = optimizer
-        # self.tr_dataloader = tr_dataloader
+        self.tr_dataloader = tr_dataloader
         self.scheduler = scheduler
 
     def is_gradient_accumulation_boundary(self, batch_idx):
+        # print("GRAD ACC CHECK", self.model.is_gradient_accumulation_boundary())
         return self.model.is_gradient_accumulation_boundary()
 
     def optimizer_step(self, batch_idx, epoch):
