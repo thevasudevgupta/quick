@@ -3,7 +3,7 @@
 `quick` is built on the top of [`pytorch`](https://github.com/pytorch/pytorch) & [`deepspeed`](https://github.com/microsoft/DeepSpeed) for making my deep learning model training more smoother & faster.
 
 ```shell
-# install torch compatible with CUDA 11.0 (on Colab & Qblocks)
+# install torch compatible with CUDA 11.0 (on Colab)
 pip3 install torch==1.7.1+cu110 torchvision==0.8.2+cu110 torchaudio==0.7.2 -f https://download.pytorch.org/whl/torch_stable.html
 
 # installing quick
@@ -36,14 +36,12 @@ pip3 install git+https://github.com/vasudevgupta7/quick@main
 >>> from quick import TrainingArgs
 >>> args = TrainingArgs(enable_deepspeed=ENABLE_DEEPSPEED)
 >>> trainer = Trainer(args)
->>> trainer.setup(model)
-
->>> trainer.fit(tr_dataset, val_dataset)
+>>> trainer.fit(model, tr_dataset, val_dataset)
 ```
 
 ```shell
 # without deespeed
-ENABLE_DEEPSPEED=False python3 train.py
+python3 train.py
 
 # with deepspeed
 ENABLE_DEEPSPEED=True deepspeed train.py
@@ -63,7 +61,6 @@ ENABLE_DEEPSPEED=True deepspeed train.py
 ...     save_strategy="epoch", # None
 ...     project_name="Quick-project",
 ...     wandb_run_name=None,
-...     # deepspeed args
 ...     enable_deepspeed=False,
 ...     deepspeed_plugin=DeepSpeedPlugin(zero_optimization={"stage": 0}),
 ...     )
