@@ -404,9 +404,10 @@ class TorchTrainer(ABC, TrainerSetup):
                 self.backward(loss)
                 self.after_backward(batch_idx)
 
-                # gradient accumulation handler
+                self.optimizer_step(batch_idx, epoch) # handling grad_accumulation inside
+
+                # logging with gradient accumulation handling
                 if self.is_gradient_accumulation_boundary(batch_idx):
-                    self.optimizer_step(batch_idx, epoch)
 
                     self.logger.log({
                     'global_steps': steps,
@@ -452,15 +453,16 @@ class TorchTrainer(ABC, TrainerSetup):
         return (batch_idx+1)%self.gradient_accumulation_steps == 0
 
     def optimizer_step(self, batch_idx, epoch):
-        # configuring for mixed-precision
-        if self.scaler is not None:
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-        else:
-            self.optimizer.step()
-            self.empty_grad_()
-        if self.scheduler is not None:
-            self.scheduler.step() # TODO: check if its correct
+        if self.is_gradient_accumulation_boundary(batch_idx):
+            # configuring for mixed-precision
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+                self.empty_grad_()
+            if self.scheduler is not None:
+                self.scheduler.step() # TODO: check if its correct
 
     def backward(self, loss):
         loss.backward()
